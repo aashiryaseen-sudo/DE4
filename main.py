@@ -1,12 +1,18 @@
 import json
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
+from database.db import get_db
+from database.models import FormVersion, User
+from form_exporter import FormExporter
+from form_ingestor import FormIngestor
 from langgraph_proper_agent import create_proper_xlsform_agent
 from models import (
     Choice,
@@ -43,46 +49,50 @@ edit_history: List[Dict[str, Any]] = []
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
-    Upload and analyze XML file
-
-    This endpoint:
-    1. Accepts XML/XLS file upload
-    2. Analyzes all worksheets automatically
-    3. Stores analysis for AI editing
+    Upload and PARSE an XML file, ingesting it into the relational database.
+    This replaces the old in-memory analysis.
     """
-    global current_form_analysis, current_uploaded_file
 
     if not file.filename.lower().endswith((".xml", ".xls")):
         raise HTTPException(status_code=400, detail="Only XML and XLS files are supported")
 
-    # Save uploaded file
-    upload_dir = "uploads"
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
-
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    temp_dir = tempfile.mkdtemp()
+    temp_file_path = os.path.join(temp_dir, file.filename)
 
     try:
-        # Analyze the uploaded file
-        parser = XLSFormParser(file_path)
-        current_form_analysis = parser.analyze_complete_form()
-        current_uploaded_file = file_path
+        content = await file.read()
+        with open(temp_file_path, "wb") as f:
+            f.write(content)
+
+        # TODO: Get the authenticated user. For now, we'll fetch a placeholder admin user (ID=1).
+        # In a real app, this would come from your auth dependency.
+        user = db.query(User).filter(User.id == 1).first()
+        if not user:
+            # TODO:This is a fallback if no user 1 exists. In prod, you'd raise an auth error.
+            user = User(username="system_admin", email="admin@system.com", password_hash="dummy")
+            print("Warning: No user found. Using dummy user for ingest.")
+
+        ingestor = FormIngestor(db, temp_file_path, user)
+        new_form_version = ingestor.ingest_form()
 
         return {
             "success": True,
-            "message": "File uploaded and analyzed successfully",
-            "file_path": file_path,
-            "worksheets": list(current_form_analysis.get("worksheets", {}).keys()),
-            "total_sheets": len(current_form_analysis.get("worksheets", {})),
-            "analysis": current_form_analysis,
+            "message": "File ingested and stored in database successfully.",
+            "form_title": new_form_version.form.title,
+            "new_version_id": new_form_version.id,
+            "version_string": new_form_version.version_string,
+            "total_fields_ingested": len(new_form_version.fields),
+            "total_choices_ingested": len(new_form_version.choices),
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error analyzing uploaded form: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing form: {str(e)}")
+
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 
 @app.post("/api/ai-edit")
@@ -180,51 +190,35 @@ async def ai_edit_endpoint(prompt: str, target_sheet: Optional[str] = None):
 
 
 @app.get("/api/export/xml")
-async def export_xml():
+async def export_xml(version_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """
-    Download the modified XML file
-
-    Returns the latest modified version if available, otherwise the original file
+    Generates and downloads a valid XML form file from the database
+    based on the provided form_version_id.
     """
-    global current_uploaded_file, current_modified_file
 
-    if not current_uploaded_file:
-        raise HTTPException(status_code=400, detail="No form uploaded. Please upload an XML file first.")
+    # The 'fields' and 'choices' will be auto-loaded via the SQLAlchemy relationships
+    version_obj = db.query(FormVersion).filter(FormVersion.id == version_id).first()
+
+    if version_obj is None:
+        raise HTTPException(status_code=404, detail="A form version with this ID was not found.")
 
     try:
-        # Prefer modified file if available, otherwise return original
-        export_file_path = (
-            current_modified_file
-            if current_modified_file and os.path.exists(current_modified_file)
-            else current_uploaded_file
-        )
+        exporter = FormExporter(version_obj)
+        temp_file_path = exporter.build_xml()
 
-        if not os.path.exists(export_file_path):
-            raise HTTPException(status_code=404, detail="XML file not found")
+        export_filename = f"{version_obj.form.form_id_string}_{version_obj.version_string}.xml"
 
-        filename = os.path.basename(current_uploaded_file)
-
-        # Determine filename based on whether we're exporting modified or original
-        if export_file_path == current_modified_file:
-            export_filename = f"edited_{filename}"
-            file_type = "modified"
-        else:
-            export_filename = f"original_{filename}"
-            file_type = "original"
+        background_tasks.add_task(os.remove, temp_file_path)
 
         return FileResponse(
-            export_file_path,
+            path=temp_file_path,
             media_type="application/xml",
             filename=export_filename,
-            headers={
-                "Content-Disposition": f"attachment; filename={export_filename}",
-                "X-File-Type": file_type,
-                "X-Has-Modifications": str(current_modified_file is not None).lower(),
-            },
+            headers={"Content-Disposition": f"attachment; filename={export_filename}"},
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Export error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error exporting XML: {str(e)}")
 
 
 @app.get("/api/status")

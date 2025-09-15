@@ -34,7 +34,7 @@ class XLSFormParser:
         
         # Get the table data
         table = survey_worksheet.find('.//ss:Table', self.namespaces)
-        if not table:
+        if table is None:
             raise ValueError("Table not found in survey worksheet")
         
         rows = table.findall('.//ss:Row', self.namespaces)
@@ -163,12 +163,12 @@ class XLSFormParser:
                 settings_worksheet = worksheet
                 break
         
-        if not settings_worksheet:
+        if settings_worksheet is None:
             return {}
         
         # Get the table data
         table = settings_worksheet.find('.//ss:Table', self.namespaces)
-        if not table:
+        if table is None:
             return {}
         
         rows = table.findall('.//ss:Row', self.namespaces)
