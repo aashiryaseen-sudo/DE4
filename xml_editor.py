@@ -319,6 +319,97 @@ class XLSFormXMLEditor:
             print(f"Error adding choice option: {str(e)}")
             return False
 
+    def modify_choice_property(self, list_name: str, choice_name: str, property_to_change: str, new_value: str) -> bool:
+        """
+        Finds a specific choice and modifies one of its properties (e.g., its 'label').
+
+        """
+        worksheets_to_check = ["select_one", "select_multiple"]
+        found_and_modified = False
+
+        try:
+            for sheet_name in worksheets_to_check:
+                worksheet = self.find_worksheet(sheet_name)
+                if worksheet is None:
+                    continue
+
+                table = self.find_table_in_worksheet(worksheet)
+                if table is None:
+                    continue
+
+                headers = self.get_headers(table)
+                try:
+                    list_name_col_index = headers.index("list name")
+                    name_col_index = headers.index("name")
+                    prop_col_index = headers.index(property_to_change)
+                except ValueError:
+                    continue
+
+                target_row = None
+                all_rows = table.findall(".//ss:Row", self.namespaces)
+
+                for row in all_rows[1:]:
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+
+                    # Simplified check assuming cells are in order.
+                    if len(cells) > list_name_col_index and len(cells) > name_col_index:
+                        list_name_data = cells[list_name_col_index].find(".//ss:Data", self.namespaces)
+                        name_data = cells[name_col_index].find(".//ss:Data", self.namespaces)
+
+                        if (
+                            list_name_data is not None
+                            and list_name_data.text == list_name
+                            and name_data is not None
+                            and name_data.text == choice_name
+                        ):
+                            target_row = row
+                            break
+
+                if target_row:
+                    target_cell = None
+                    current_idx = 0
+                    cells_in_row = target_row.findall(".//ss:Cell", self.namespaces)
+
+                    for i, cell in enumerate(cells_in_row):
+                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                        if index_attr:
+                            current_idx = int(index_attr) - 1
+
+                        if current_idx == prop_col_index:
+                            target_cell = cell
+                            break
+
+                        if current_idx > prop_col_index:
+                            target_cell = ET.Element(f"{{{self.namespaces['ss']}}}Cell")
+                            target_cell.set(f"{{{self.namespaces['ss']}}}Index", str(prop_col_index + 1))
+                            target_row.insert(i, target_cell)
+                            break
+
+                        current_idx += 1
+
+                    if target_cell is None:
+                        target_cell = ET.SubElement(target_row, f"{{{self.namespaces['ss']}}}Cell")
+
+                    data_elem = target_cell.find(f".//ss:Data", self.namespaces)
+                    if data_elem is None:
+                        data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
+                        data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
+
+                    data_elem.text = str(new_value)
+                    self.modified = True
+                    found_and_modified = True
+                    print(f"Successfully modified choice '{choice_name}' in list '{list_name}'.")
+                    break
+
+            if not found_and_modified:
+                print(f"WARN: Could not find choice '{choice_name}' in list '{list_name}'.")
+
+            return found_and_modified
+
+        except Exception as e:
+            print(f"ERROR in modify_choice_property: {str(e)}")
+            return False
+
     def add_choice_options_batch(
         self, list_name: str, items: List[Dict[str, str]], worksheet_name: str = None
     ) -> Dict[str, Any]:

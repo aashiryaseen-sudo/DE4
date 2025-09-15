@@ -111,6 +111,39 @@ class XLSFormProperAgent:
                 return json.dumps({"success": False, "error": str(e)})
 
         @tool
+        def modify_choice(list_name: str, choice_name: str, property_to_change: str, new_value: str) -> str:
+            """Modifies an existing choice within a dropdown list."""
+            try:
+                xml_editor = create_xml_editor(self.xml_file_path)
+                success = xml_editor.modify_choice_property(list_name, choice_name, property_to_change, new_value)
+
+                if success and xml_editor.modified:
+                    output_path = xml_editor.save_modified_xml()
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "message": f"Choice '{choice_name}' in list '{list_name}' was successfully updated.",
+                            "modified_file_path": output_path,
+                        },
+                        indent=2,
+                    )
+                elif not success:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "message": f"Failed to modify choice '{choice_name}'. It may not exist in list '{list_name}'.",
+                        },
+                        indent=2,
+                    )
+                else:
+                    return json.dumps(
+                        {"success": True, "message": "Modification was successful but no changes were saved."}
+                    )
+
+            except Exception as e:
+                return json.dumps({"success": False, "error": str(e)})
+
+        @tool
         def analyze_form_structure(worksheet_name: str = None) -> str:
             """Analyze the structure of the XLSForm or a specific worksheet."""
             try:
@@ -264,6 +297,7 @@ class XLSFormProperAgent:
             analyze_form_structure,
             delete_field,
             modify_field_property,
+            modify_choice
         ]
 
     def _build_graph(self):

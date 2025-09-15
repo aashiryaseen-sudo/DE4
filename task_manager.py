@@ -71,6 +71,8 @@ class XLSFormTaskManager:
             "add_choice_single": self._handle_add_choice_single,
             "analyze_structure": self._handle_analyze_structure,
             "delete_field": self._handle_delete_field,
+            "modify_field_property": self._handle_modify_field_property,
+            "modify_choice": self._handle_modify_choice,
         }
 
     # ---------- Planning ----------
@@ -84,6 +86,32 @@ class XLSFormTaskManager:
             s = seg.strip()
             if not s:
                 continue
+
+            if "list" in s.lower() and "choice named" in s.lower() and "change" in s.lower():
+                list_name = self._extract(r"in the ['\"]([\w:]+)['\"]\s+list", s)
+                choice_name = self._extract(r"choice named ['\"]([\w:]+)['\"]", s)
+                prop_name = self._extract(r"change the ['\"]([\w:]+)['\"]", s)
+                new_value = self._extract(r"to ['\"]([^']+)['\"]", s)
+
+                if all([list_name, choice_name, prop_name, new_value is not None]):
+                    title = f"Modify choice '{choice_name}' in list '{list_name}'"
+                    params = {
+                        "list_name": list_name,
+                        "choice_name": choice_name,
+                        "property_to_change": prop_name,
+                        "new_value": new_value,
+                    }
+                    tasks.append(
+                        DynTask(
+                            id=self._tid(len(tasks)),
+                            title=title,
+                            action="modify_choice",
+                            worksheet=None,
+                            parameters=params,
+                        )
+                    )
+                    continue
+
             if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "field" in s.lower():
                 prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+property", s)
                 field_name = self._extract(r"field\s+['\"]([\w:]+)['\"]", s)
@@ -336,6 +364,29 @@ class XLSFormTaskManager:
             result["message"] = f"Property '{prop_name}' for field '{field_name}' was updated."
         elif not success:
             result["message"] = f"Could not modify property for field '{field_name}'."
+
+        return result
+
+    def _handle_modify_choice(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        editor = create_xml_editor(self.xml_file_path)
+
+        list_name = params.get("list_name")
+        choice_name = params.get("choice_name")
+        prop_name = params.get("property_to_change")
+        new_value = params.get("new_value")
+
+        if not all([list_name, choice_name, prop_name, new_value is not None]):
+            return {"success": False, "error": "Missing one of required parameters for modify_choice"}
+
+        success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
+        result = {"success": success}
+
+        if success and editor.modified:
+            out = editor.save_modified_xml()
+            result["modified_file_path"] = out
+            result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
+        elif not success:
+            result["message"] = f"Could not modify choice '{choice_name}'."
 
         return result
 
