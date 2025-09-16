@@ -111,6 +111,39 @@ class XLSFormProperAgent:
                 return json.dumps({"success": False, "error": str(e)})
 
         @tool
+        def modify_choice(list_name: str, choice_name: str, property_to_change: str, new_value: str) -> str:
+            """Modifies an existing choice within a dropdown list."""
+            try:
+                xml_editor = create_xml_editor(self.xml_file_path)
+                success = xml_editor.modify_choice_property(list_name, choice_name, property_to_change, new_value)
+
+                if success and xml_editor.modified:
+                    output_path = xml_editor.save_modified_xml()
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "message": f"Choice '{choice_name}' in list '{list_name}' was successfully updated.",
+                            "modified_file_path": output_path,
+                        },
+                        indent=2,
+                    )
+                elif not success:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "message": f"Failed to modify choice '{choice_name}'. It may not exist in list '{list_name}'.",
+                        },
+                        indent=2,
+                    )
+                else:
+                    return json.dumps(
+                        {"success": True, "message": "Modification was successful but no changes were saved."}
+                    )
+
+            except Exception as e:
+                return json.dumps({"success": False, "error": str(e)})
+
+        @tool
         def analyze_form_structure(worksheet_name: str = None) -> str:
             """Analyze the structure of the XLSForm or a specific worksheet."""
             try:
@@ -173,7 +206,7 @@ class XLSFormProperAgent:
                 task_manager = create_task_manager(self.xml_file_path)
                 # Note: In production, we'd need session persistence
                 # For now, we'll re-create and execute immediately
-                result = task_manager.execute_task_session(confirm)
+                result = task_manager.execute_task_session(session_id=session_id, confirm=confirm)
                 return json.dumps(
                     {
                         "execution_completed": True,
@@ -255,6 +288,34 @@ class XLSFormProperAgent:
             except Exception as e:
                 return json.dumps({"success": False, "error": str(e)})
 
+        @tool
+        def clone_form_with_filter(new_form_name: str, equipment_list_csv: str) -> str:
+            """Clones the current master form but includes ONLY the equipment sections specified.
+            Args:
+                new_form_name (str): The desired title and ID for the new form.
+                equipment_list_csv (str): A comma-separated list of the equipment_type values to KEEP.
+            """
+            try:
+                editor = create_xml_editor(self.xml_file_path)
+                equipment_to_keep = [e.strip() for e in equipment_list_csv.split(",") if e.strip()]
+
+                output_path = editor.clone_and_filter_by_equipment(new_form_name, equipment_to_keep)
+
+                if output_path:
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "message": f"Successfully cloned form with {len(equipment_to_keep)} equipment types.",
+                            "new_form_path": output_path,
+                        },
+                        indent=2,
+                    )
+                else:
+                    return json.dumps({"success": False, "error": "Cloning process failed."})
+
+            except Exception as e:
+                return json.dumps({"success": False, "error": str(e)})
+
         return [
             add_choice_option_to_list,
             add_choice_options_batch,
@@ -264,6 +325,8 @@ class XLSFormProperAgent:
             analyze_form_structure,
             delete_field,
             modify_field_property,
+            modify_choice,
+            clone_form_with_filter,
         ]
 
     def _build_graph(self):
@@ -302,18 +365,20 @@ class XLSFormProperAgent:
 
         def call_model(state: AgentState, config: RunnableConfig):
             """Invoke the model with system prompt and current state."""
-            system_prompt = SystemMessage(
-                """You are an XLSForm editor with task management capabilities. 
+            system_prompt = SystemMessage("""You are an expert XLSForm editor. Your first step is to analyze the user's intent.
+            Workflow 1: Creating a NEW FILTERED FORM
+            If the user's request is to 'clone' a master or 'create a new form' AND they provide a specific list of 'equipment types' or 'sections' to include...
+            - THEN you MUST call the 'clone_form_with_filter' tool.
+            - This is a single-step operation.
 
-For COMPLEX operations (multiple items, multiple sheets, or multi-step requests):
-1. First use create_task_plan to break down the request into manageable tasks
-2. Then use execute_task_plan to perform the operations with progress tracking
+            Workflow 2: Editing an EXISTING FORM
+            If the user's request involves one or more edits (like 'add field', 'delete field', 'modify property', 'change choice')...
+            - THEN you MUST use the task management system.
+            - Your process for this is:
+            - 1. First, you MUST use the 'create_task_plan' tool. Pass the user's entire prompt to it.
+            - 2. Second, you MUST use the 'execute_task_plan' tool to run the plan.
 
-For SIMPLE operations (single addition, single modification):
-- Use the direct tools (add_choice_option_to_list, add_row_auto, etc.)
-
-Always prioritize task management for complex requests to prevent errors and file explosion."""
-            )
+            Do not call any other atomic tools (like add_row_auto, delete_field) directly. Your choice is between 'clone_form_with_filter' OR the 'create_task_plan' sequence.""")
 
             response = self.model.invoke([system_prompt] + state["messages"], config)
             print(f"🤖 Model response: {response.content}")
