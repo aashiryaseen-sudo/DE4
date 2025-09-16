@@ -693,8 +693,15 @@ class XLSFormXMLEditor:
             if data_elem is None:
                 data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
                 data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
-
-            data_elem.text = str(new_value)
+            if str(new_value).upper() == "TRUE":
+                data_elem.set(f"{{{self.namespaces['ss']}}}Type", "Boolean")
+                data_elem.text = "1"
+            elif str(new_value).upper() == "FALSE":
+                data_elem.set(f"{{{self.namespaces['ss']}}}Type", "Boolean")
+                data_elem.text = "0"
+            else:
+                data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
+                data_elem.text = str(new_value)
 
             self.modified = True
             print(f" Successfully modified property '{property_name}' for field '{field_name}'.")
@@ -703,6 +710,158 @@ class XLSFormXMLEditor:
         except Exception as e:
             print(f" ERROR in modify_field_property: {str(e)}")
             return False
+
+    def clone_and_filter_by_equipment(self, new_form_name: str, equipment_to_keep: List[str]) -> Optional[str]:
+        """
+        Creates a new, filtered XML file based on a list of equipment types.
+        This is a two-pass operation:
+        1. Filters the 'survey' sheet and collects all 'list_name's that are still required.
+        2. Rebuilds the 'select_one' and 'select_multiple' sheets, keeping only the choice lists collected in pass one.
+        """
+        try:
+            equipment_set_to_keep = {e.lower() for e in equipment_to_keep}
+
+            new_root = ET.Element(self.root.tag, self.root.attrib)
+            for child in self.root:
+                if child.tag != f"{{{self.namespaces['ss']}}}Worksheet":
+                    new_root.append(child)
+
+            used_choice_lists = set()
+
+            survey_ws = self.find_worksheet("survey")
+            if survey_ws is None:
+                raise ValueError("'survey' worksheet not found in master form.")
+
+            survey_table = self.find_table_in_worksheet(survey_ws)
+            if survey_table is None:
+                raise ValueError("Table not found in master 'survey' worksheet.")
+
+            headers = self.get_headers(survey_table)
+            all_rows = survey_table.findall(".//ss:Row", self.namespaces)
+            header_row = all_rows[0]
+            data_rows = all_rows[1:]
+
+            try:
+                type_col_index = headers.index("type")
+                equip_col_index = headers.index("equipment_type")
+                relevant_col_index = headers.index("relevant")
+            except ValueError as e:
+                raise ValueError(f"Missing required column in survey: {e}. Headers are: {headers}")
+
+            new_survey_ws = ET.SubElement(new_root, f"{{{self.namespaces['ss']}}}Worksheet")
+            new_survey_ws.set(f"{{{self.namespaces['ss']}}}Name", "survey")
+            new_survey_table = ET.SubElement(new_survey_ws, f"{{{self.namespaces['ss']}}}Table")
+            new_survey_table.append(header_row)
+
+            rows_added_count = 0
+
+            for row in data_rows:
+                cells = row.findall(".//ss:Cell", self.namespaces)
+                cell_data_map = {}
+                current_idx = 0
+                for cell in cells:
+                    index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                    if index_attr:
+                        current_idx = int(index_attr) - 1
+
+                    if current_idx < len(headers):
+                        header_name = headers[current_idx]
+                        data_elem = cell.find(".//ss:Data", self.namespaces)
+                        if data_elem is not None:
+                            cell_data_map[header_name] = data_elem.text or ""
+                    current_idx += 1
+
+                row_equip_type = cell_data_map.get("equipment_type", "").lower()
+                relevant_text = cell_data_map.get("relevant", "").lower()
+                row_type_text = cell_data_map.get("type", "")
+
+                keep_this_row = False
+
+                if not row_equip_type:
+                    keep_this_row = True
+
+                elif row_equip_type in equipment_set_to_keep:
+                    keep_this_row = True
+
+                else:
+                    for equip_name in equipment_set_to_keep:
+                        if re.search(rf"['\"]{re.escape(equip_name)}['\"]", relevant_text) or re.search(
+                            rf"\b{re.escape(equip_name)}\b", relevant_text
+                        ):
+                            keep_this_row = True
+                            break
+
+                if keep_this_row:
+                    new_survey_table.append(row)
+                    rows_added_count += 1
+
+                    if row_type_text:
+                        match = re.match(r"^(select_one|select_multiple)\s+(\S+)", row_type_text, re.IGNORECASE)
+                        if match:
+                            list_name = match.group(2)
+                            used_choice_lists.add(list_name)
+
+            new_survey_table.set(f"{{{self.namespaces['ss']}}}ExpandedRowCount", str(rows_added_count + 1))
+            print(
+                f"✅ Survey filtered. Kept {rows_added_count} rows. Found {len(used_choice_lists)} unique choice lists."
+            )
+
+            for sheet_name in ["select_one", "select_multiple"]:
+                original_choice_ws = self.find_worksheet(sheet_name)
+                if original_choice_ws is None:
+                    continue
+
+                choice_table = self.find_table_in_worksheet(original_choice_ws)
+                if choice_table is None:
+                    continue
+
+                choice_headers = self.get_headers(choice_table)
+                choice_header_row = choice_table.find(".//ss:Row", self.namespaces)
+                all_choice_rows = choice_table.findall(".//ss:Row", self.namespaces)[1:]
+
+                try:
+                    list_name_col_index = choice_headers.index("list name")
+                except ValueError:
+                    print(f"⚠️ WARN: Skipping sheet '{sheet_name}', missing 'list name' column.")
+                    continue
+
+                new_choice_ws = ET.SubElement(new_root, f"{{{self.namespaces['ss']}}}Worksheet")
+                new_choice_ws.set(f"{{{self.namespaces['ss']}}}Name", sheet_name)
+                new_choice_table = ET.SubElement(new_choice_ws, f"{{{self.namespaces['ss']}}}Table")
+                new_choice_table.append(choice_header_row)
+
+                choices_added_count = 0
+                for row in all_choice_rows:
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+                    if len(cells) > list_name_col_index:
+                        data_elem = cells[list_name_col_index].find(".//ss:Data", self.namespaces)
+                        if data_elem is not None and data_elem.text in used_choice_lists:
+                            new_choice_table.append(row)
+                            choices_added_count += 1
+
+                new_choice_table.set(f"{{{self.namespaces['ss']}}}ExpandedRowCount", str(choices_added_count + 1))
+                print(f"✅ Filtered '{sheet_name}' sheet. Kept {choices_added_count} choices.")
+
+            settings_ws = self.find_worksheet("settings")
+            if settings_ws is not None:
+                new_root.append(settings_ws)
+
+            self.tree = ET.ElementTree(new_root)
+            self.modified = True
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = f"modified_{new_form_name.replace(' ', '_')}_{timestamp}.xml"
+
+            self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
+            print(f"✅ Fully Filtered clone (including choices) saved to: {output_path}")
+            return output_path
+
+        except Exception as e:
+            print(f"❌ ERROR in clone_and_filter: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
+            return None
 
     def execute_operation(self, operation: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a single edit operation"""
