@@ -4,18 +4,14 @@ import {
   Users, 
   FileText, 
   Activity, 
-  Settings,
   TrendingUp,
-  Clock,
   CheckCircle,
   XCircle,
   AlertCircle,
-  Eye,
-  Download,
   Loader2,
   RefreshCw
 } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import toast from 'react-hot-toast';
 
 const AdminDashboard = () => {
@@ -75,7 +71,7 @@ const AdminDashboard = () => {
   ];
 
   const requestsData = [
-    { name: 'Pending', value: stats.pending_requests, color: '#F59E0B' },
+    { name: 'Failed', value: stats.pending_requests, color: '#EF4444' },
     { name: 'Completed', value: stats.customization_requests - stats.pending_requests, color: '#10B981' }
   ];
 
@@ -98,6 +94,10 @@ const AdminDashboard = () => {
     if (priority === 2) return 'text-yellow-600';
     return 'text-green-600';
   };
+
+  const successRate = stats.form_operations > 0
+    ? ((stats.successful_operations / stats.form_operations) * 100).toFixed(1)
+    : '0.0';
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -174,7 +174,7 @@ const AdminDashboard = () => {
                 <p className="text-sm font-medium text-gray-500">Operations</p>
                 <p className="text-2xl font-bold text-gray-900">{stats.form_operations}</p>
                 <p className="text-xs text-gray-500">
-                  {((stats.successful_operations / stats.form_operations) * 100).toFixed(1)}% success rate
+                  {successRate}% success rate
                 </p>
               </div>
             </div>
@@ -219,7 +219,7 @@ const AdminDashboard = () => {
 
         <div className="card">
           <div className="card-header">
-            <h2 className="text-lg font-semibold text-gray-900">Customization Requests</h2>
+            <h2 className="text-lg font-semibold text-gray-900">User Prompts</h2>
           </div>
           <div className="card-content">
             <ResponsiveContainer width="100%" height={200}>
@@ -284,7 +284,7 @@ const AdminDashboard = () => {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        v{form.current_version}
+                        Current: {form.current_version}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         {form.usage_count}
@@ -297,46 +297,35 @@ const AdminDashboard = () => {
           </div>
         </div>
 
-        {/* Recent Requests */}
+        {/* Recent Form Versions */}
         <div className="card">
           <div className="card-header">
-            <h2 className="text-lg font-semibold text-gray-900">Recent Requests</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Recent Form Versions</h2>
           </div>
           <div className="card-content p-0">
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Client
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Priority
-                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Form</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Version</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {customization_requests.slice(0, 5).map((request) => (
-                    <tr key={request.id}>
+                  {form_versions.slice(0, 10).map((v) => (
+                    <tr key={v.id}>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{v.master_form_name || v.master_form_id}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{v.version}</td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div>
-                          <div className="text-sm font-medium text-gray-900">{request.client_name}</div>
-                          <div className="text-sm text-gray-500">{request.form_title}</div>
-                        </div>
+                        {v.is_current ? (
+                          <span className="badge badge-green">Yes</span>
+                        ) : (
+                          <span className="badge">No</span>
+                        )}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`badge ${getStatusBadge(request.status)}`}>
-                          {request.status.replace('_', ' ')}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`text-sm font-medium ${getPriorityColor(request.priority)}`}>
-                          {request.priority === 1 ? 'High' : request.priority === 2 ? 'Medium' : 'Low'}
-                        </span>
-                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(v.created_at).toLocaleString()}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -346,8 +335,63 @@ const AdminDashboard = () => {
         </div>
       </div>
 
+      {/* Recent User Prompts */}
+        <div className="card">
+          <div className="card-header">
+          <h2 className="text-lg font-semibold text-gray-900">Recent User Prompts</h2>
+          </div>
+          <div className="card-content p-0">
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Prompt
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Target Sheet
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Time
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {customization_requests.slice(0, 5).map((request) => (
+                    <tr key={request.id}>
+                    <td className="px-6 py-4">
+                      <div className="text-sm text-gray-900 max-w-xs truncate" title={request.prompt}>
+                        {request.prompt}
+                      </div>
+                    </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-500">
+                        {request.target_sheet || 'All sheets'}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`badge ${request.status === 'completed' ? 'badge-success' : 'badge-error'}`}>
+                        {request.status}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm text-gray-500">
+                        {request.timestamp ? new Date(request.timestamp).toLocaleString() : 'Unknown'}
+                      </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+          </div>
+        </div>
+      </div>
+
       {/* Active Sessions */}
-      <div className="card mb-8">
+      <div className="card mb-8 mt-8">
         <div className="card-header">
           <h2 className="text-lg font-semibold text-gray-900">Active Sessions</h2>
         </div>

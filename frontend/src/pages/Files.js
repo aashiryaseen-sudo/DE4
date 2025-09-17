@@ -55,7 +55,8 @@ const Files = () => {
       }
     } catch (error) {
       console.error('AI edit failed:', error);
-      toast.error('AI edit failed. Please try again.');
+      const errorMessage = error.response?.data?.detail || error.message || 'AI edit failed. Please try again.';
+      toast.error(errorMessage);
     } finally {
       setEditing(false);
     }
@@ -146,7 +147,7 @@ const Files = () => {
                 <FileText className="h-5 w-5 text-gray-400 mt-0.5" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-900 truncate">
-                    {status.original_file?.split('/').pop() || 'Unknown file'}
+                    {status.original_file?.split(/[/\\]/).pop() || 'Unknown file'}
                   </p>
                   <p className="text-xs text-gray-500">Original file</p>
                 </div>
@@ -157,7 +158,7 @@ const Files = () => {
                   <Edit3 className="h-5 w-5 text-green-500 mt-0.5" />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-gray-900 truncate">
-                      {status.modified_file?.split('/').pop() || 'Modified version'}
+                      {status.modified_file?.split(/[/\\]/).pop() || 'Modified version'}
                     </p>
                     <p className="text-xs text-gray-500">Modified version</p>
                   </div>
@@ -184,12 +185,15 @@ const Files = () => {
               <div className="pt-4 border-t">
                 <button
                   onClick={handleExport}
-                  disabled={exporting}
-                  className="btn-primary w-full"
+                  disabled={!status.has_modifications || exporting}
+                  className={`w-full btn-primary ${(!status.has_modifications || exporting) ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <Download className="h-4 w-4 mr-2" />
                   {exporting ? 'Exporting...' : 'Export XML'}
                 </button>
+                {!status.has_modifications && (
+                  <p className="text-xs text-gray-500 mt-2">Run AI edits to enable export.</p>
+                )}
               </div>
             </div>
           </div>

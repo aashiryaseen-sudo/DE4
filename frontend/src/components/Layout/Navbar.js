@@ -16,7 +16,7 @@ const Navbar = () => {
 
   const navigation = [
     { name: 'Upload', href: '/upload', icon: Upload },
-    { name: 'Files', href: '/files', icon: FileText },
+    { name: 'Editor', href: '/editor', icon: FileText },
     ...(isAdmin() ? [{ name: 'Admin', href: '/admin', icon: Settings }] : []),
   ];
 

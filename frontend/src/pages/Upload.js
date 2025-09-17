@@ -10,10 +10,16 @@ const UploadPage = () => {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
 
+  const [prompt, setPrompt] = useState('');
+  const [targetSheet, setTargetSheet] = useState('');
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiResult, setAiResult] = useState(null);
+
   const handleFileSelect = (selectedFile) => {
     if (selectedFile && (selectedFile.name.endsWith('.xml') || selectedFile.name.endsWith('.xls'))) {
       setFile(selectedFile);
       setUploadResult(null);
+      setAiResult(null);
     } else {
       toast.error('Please select a valid XML or XLS file');
     }
@@ -60,8 +66,56 @@ const UploadPage = () => {
   const removeFile = () => {
     setFile(null);
     setUploadResult(null);
+    setAiResult(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
+    }
+  };
+
+  const handleRunAiEdit = async () => {
+    if (!uploadResult) {
+      toast.error('Upload a file first.');
+      return;
+    }
+    if (!prompt.trim()) {
+      toast.error('Enter a prompt to run AI edit.');
+      return;
+    }
+    setAiRunning(true);
+    setAiResult(null);
+    try {
+      const res = await fileAPI.aiEdit(prompt.trim(), targetSheet || null);
+      setAiResult(res.data);
+      if (res.data?.success) {
+        toast.success('AI edit completed.');
+      } else {
+        toast.error(res.data?.error || 'AI edit failed.');
+      }
+    } catch (e) {
+      console.error('AI edit failed:', e);
+      toast.error('AI edit failed.');
+    } finally {
+      setAiRunning(false);
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      const res = await fileAPI.export();
+      const blob = new Blob([res.data], { type: 'application/xml' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      // Try to infer a filename
+      const baseName = uploadResult?.file_path ? uploadResult.file_path.split('/').pop() : 'form.xml';
+      link.href = url;
+      link.download = `export_${baseName}`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Export failed:', e);
+      toast.error('Export failed.');
     }
   };
 
@@ -158,14 +212,16 @@ const UploadPage = () => {
           </div>
         </div>
 
-        {/* Results Section */}
+        {/* Results & AI Section */}
         <div className="space-y-6">
           {uploadResult && (
             <div className="card">
               <div className="card-header">
-                <div className="flex items-center space-x-2">
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                  <h2 className="text-lg font-semibold text-gray-900">Analysis Complete</h2>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                    <h2 className="text-lg font-semibold text-gray-900">Analysis Complete</h2>
+                  </div>
                 </div>
               </div>
               <div className="card-content space-y-4">
@@ -200,8 +256,11 @@ const UploadPage = () => {
                     ✓ File ready for AI editing
                   </p>
                   <p className="text-xs text-gray-500 mt-1">
-                    You can now use natural language prompts to modify your form
+                    Continue to the AI Editor to apply changes and export your XML
                   </p>
+                  <div className="mt-3">
+                    <a className="btn-primary" href="/editor">Go to AI Editor</a>
+                  </div>
                 </div>
               </div>
             </div>

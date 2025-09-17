@@ -350,6 +350,124 @@ class XLSFormXMLEditor:
                 failures.append({"label": lab, "name": nm, "reason": "insert failed"})
         return {"added": added, "failed": failures, "modified": self.modified}
 
+    def modify_choice_property(self, list_name: str, choice_name: str, property_name: str, new_value: str) -> bool:
+        """
+        Modify a property (commonly 'label' or 'name') of a choice row where list_name == list_name and name == choice_name.
+
+        - Searches worksheets detected by detect_choice_worksheets()
+        - Supports common header variants: ['label','name','list name','order'] or ['list_name','name','label']
+        - Returns True if at least one matching row is updated
+        """
+        try:
+            updated = 0
+
+            # Gather candidate worksheets that look like choices
+            candidates = self.detect_choice_worksheets()
+            for ws_name in candidates:
+                worksheet = self.find_worksheet(ws_name)
+                if worksheet is None:
+                    continue
+                table = self.find_table_in_worksheet(worksheet)
+                if table is None:
+                    continue
+
+                headers = [h.lower().strip() for h in self.get_headers(table)]
+                if not headers:
+                    continue
+
+                # Helper to map header aliases
+                def idx_of(*aliases: str) -> int:
+                    for a in aliases:
+                        if a in headers:
+                            return headers.index(a)
+                    return -1
+
+                list_idx = idx_of("list name", "list_name")
+                name_idx = idx_of("name")
+                label_idx = idx_of("label")
+                order_idx = idx_of("order")
+
+                if list_idx == -1 or name_idx == -1:
+                    continue
+
+                rows = table.findall(".//ss:Row", self.namespaces)
+                for row in rows[1:]:  # skip header row
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+                    # Build sparse mapping index->text honoring ss:Index
+                    expanded: Dict[int, str] = {}
+                    current_idx = 0
+                    for cell in cells:
+                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                        if index_attr:
+                            current_idx = int(index_attr) - 1
+                        data_elem = cell.find(".//ss:Data", self.namespaces)
+                        expanded[current_idx] = data_elem.text if data_elem is not None else ""
+                        current_idx += 1
+
+                    row_list = (expanded.get(list_idx, "") or "").strip()
+                    row_name = (expanded.get(name_idx, "") or "").strip()
+                    if row_list == str(list_name).strip() and row_name == str(choice_name).strip():
+                        # Determine target column
+                        target_col = None
+                        prop = property_name.lower().strip()
+                        if prop == "label" and label_idx != -1:
+                            target_col = label_idx
+                        elif prop == "name":
+                            target_col = name_idx
+                        elif prop == "order" and order_idx != -1:
+                            target_col = order_idx
+                        else:
+                            # Unsupported property for this row structure
+                            continue
+
+                        # Locate or create the target cell honoring ss:Index
+                        target_cell = None
+                        current_idx = 0
+                        for cell in cells:
+                            index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                            if index_attr:
+                                current_idx = int(index_attr) - 1
+                            if current_idx == target_col:
+                                target_cell = cell
+                                break
+                            if current_idx > target_col:
+                                break
+                            current_idx += 1
+
+                        if target_cell is None:
+                            # Insert a new cell with ss:Index at the correct position
+                            target_cell = ET.Element(f"{{{self.namespaces['ss']}}}Cell")
+                            target_cell.set(f"{{{self.namespaces['ss']}}}Index", str(target_col + 1))
+
+                            # Insert preserving order
+                            inserted = False
+                            for idx, cell in enumerate(cells):
+                                idx_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                                if idx_attr and int(idx_attr) - 1 > target_col:
+                                    row.insert(idx, target_cell)
+                                    inserted = True
+                                    break
+                            if not inserted:
+                                row.append(target_cell)
+
+                        data_elem = target_cell.find(f".//ss:Data", self.namespaces)
+                        if data_elem is None:
+                            data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
+                            data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
+                        data_elem.text = str(new_value)
+                        updated += 1
+
+            if updated > 0:
+                self.modified = True
+                print(f" Updated {updated} choice row(s) for list '{list_name}', choice '{choice_name}' – set {property_name} -> {new_value}.")
+                return True
+            else:
+                print(f" WARN: No matching choice found for list '{list_name}', choice '{choice_name}'.")
+                return False
+        except Exception as e:
+            print(f" ERROR in modify_choice_property: {str(e)}")
+            return False
+
     def modify_cell(self, worksheet_name: str, row_index: int, column_index: int, new_value: str) -> bool:
         """Modify a specific cell value"""
         try:
@@ -738,11 +856,12 @@ class XLSFormXMLEditor:
         try:
             from datetime import datetime
 
-            # Generate timestamped filename in main directory if no path provided
+            # Generate timestamped filename in the SAME directory as the original by default
             if output_path is None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 original_name = os.path.basename(self.original_xml_path).replace(".xml", "")
-                output_path = f"modified_{original_name}_{timestamp}.xml"
+                original_dir = os.path.dirname(os.path.abspath(self.original_xml_path))
+                output_path = os.path.join(original_dir, f"modified_{original_name}_{timestamp}.xml")
 
             # Create backup of original if this is the first save
             backup_path = f"{self.original_xml_path}.backup"
@@ -754,7 +873,7 @@ class XLSFormXMLEditor:
             self.tree.write(output_path, encoding="utf-8", xml_declaration=True, method="xml")
 
             print(f"✅ Modified XML saved to: {os.path.abspath(output_path)}")
-            return output_path
+            return os.path.abspath(output_path)
 
         except Exception as e:
             print(f"❌ Error saving XML: {str(e)}")

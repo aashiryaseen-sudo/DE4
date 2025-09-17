@@ -66,7 +66,7 @@ export const fileAPI = {
     });
   },
   aiEdit: (prompt, targetSheet = null) => 
-    api.post('/api/ai-edit', { prompt, target_sheet: targetSheet }),
+    api.post('/api/ai-edit', null, { params: { prompt, target_sheet: targetSheet || undefined } }),
   export: () => api.get('/api/export/xml', { responseType: 'blob' }),
 };
 

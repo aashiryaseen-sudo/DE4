@@ -38,7 +38,7 @@ const AppRoutes = () => {
         </ProtectedRoute>
       } />
       
-      <Route path="/files" element={
+      <Route path="/editor" element={
         <ProtectedRoute>
           <Layout>
             <Files />

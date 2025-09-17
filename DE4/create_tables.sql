@@ -68,7 +68,7 @@ CREATE TABLE master_forms (
     description TEXT,
     
     -- Version management
-    current_version VARCHAR(20) NOT NULL,
+    current_version VARCHAR(100) NOT NULL,
     version_count INTEGER NOT NULL DEFAULT 1,
     
     -- Form metadata
@@ -100,7 +100,7 @@ CREATE TABLE master_forms (
 CREATE TABLE form_versions (
     id SERIAL PRIMARY KEY,
     master_form_id INTEGER NOT NULL REFERENCES master_forms(id) ON DELETE CASCADE,
-    version VARCHAR(20) NOT NULL,
+    version VARCHAR(100) NOT NULL,
     
     -- Version details
     version_notes TEXT,
