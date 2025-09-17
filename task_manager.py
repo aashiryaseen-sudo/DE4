@@ -114,6 +114,35 @@ class XLSFormTaskManager:
                     )
                     continue
 
+            if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "setting" in s.lower():
+                prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+setting", s)
+                if not prop_name:
+                    prop_name = self._extract(r"change\s+(form_title|form_id|version)\s+to", s)
+
+                new_value = self._extract(r"to\s+(.+)$", s)
+                if new_value:
+                    new_value = new_value.strip(" '\"")
+
+                if prop_name and new_value is not None:
+                    title = f"Modify setting '{prop_name}'"
+                    params = {
+                        "worksheet_name": "settings",
+                        "key_field_name": "form_id",
+                        "key_field_value": "__DUMMY_SETTINGS_VALUE__",
+                        "property_to_change": prop_name,
+                        "new_value": new_value,
+                    }
+                    tasks.append(
+                        DynTask(
+                            id=self._tid(len(tasks)),
+                            title=title,
+                            action="modify_field_property",
+                            worksheet="settings",
+                            parameters=params,
+                        )
+                    )
+                    continue
+
             if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "field" in s.lower():
                 prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+property", s)
                 field_name = self._extract(r"field\s+['\"]([\w:]+)['\"]", s)
@@ -121,7 +150,13 @@ class XLSFormTaskManager:
 
                 if prop_name and field_name and new_value is not None:
                     title = f"Modify property '{prop_name}' for field '{field_name}'"
-                    params = {"field_name": field_name, "property_name": prop_name, "new_value": new_value}
+                    params = {
+                        "worksheet_name": "survey",
+                        "key_field_name": "name",  # In the 'survey' sheet, the key field is 'name'
+                        "key_field_value": field_name,  # The value for the 'name' key is the field_name
+                        "property_to_change": prop_name,
+                        "new_value": new_value,
+                    }
                     tasks.append(
                         DynTask(
                             id=self._tid(len(tasks)),
@@ -353,22 +388,29 @@ class XLSFormTaskManager:
         return result
 
     def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        field_name = params.get("field_name")
-        prop_name = params.get("property_name")
+        worksheet_name = params.get("worksheet_name")
+        key_field_name = params.get("key_field_name")
+        key_field_value = params.get("key_field_value")
+
+        property_to_change = params.get("property_to_change")
         new_value = params.get("new_value")
 
-        if not all([field_name, prop_name, new_value is not None]):
+        if not all([worksheet_name, key_field_name, key_field_value, property_to_change, new_value is not None]):
             return {
                 "success": False,
                 "error": "Missing one of required parameters: field_name, property_name, new_value",
             }
 
-        success = editor.modify_field_property(field_name, prop_name, new_value)
+        success = editor.modify_field_property(
+            worksheet_name, key_field_name, key_field_value, property_to_change, new_value
+        )
         result = {"success": success}
         if success and editor.modified:
-            result["message"] = f"Property '{prop_name}' for field '{field_name}' was updated."
+            result["message"] = (
+                f"Property '{property_to_change}' for field '{key_field_name}' was updated. in sheet {worksheet_name}"
+            )
         elif not success:
-            result["message"] = f"Could not modify property for field '{field_name}'."
+            result["message"] = f"Could not modify property for field '{key_field_name}' for sheet {worksheet_name}."
 
         return result
 

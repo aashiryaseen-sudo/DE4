@@ -621,44 +621,53 @@ class XLSFormXMLEditor:
             print(f"ERROR in remove_field_by_name: {str(e)}")
             return False
 
-    def modify_field_property(self, field_name: str, property_name: str, new_value: str) -> bool:
+    def modify_field_property(
+        self, worksheet_name: str, key_field_name: str, key_field_value: str, property_to_change: str, new_value: str
+    ) -> bool:
         """
         Finds a field in the survey sheet by its name and modifies one of its properties.
         """
         try:
-            worksheet = self.find_worksheet("survey")
+            worksheet = self.find_worksheet(worksheet_name)
             if worksheet is None:
-                print("ERROR: 'survey' worksheet not found.")
+                print(f"ERROR: {worksheet_name} worksheet not found.")
                 return False
 
             table = self.find_table_in_worksheet(worksheet)
             if table is None:
-                print("ERROR: Table not found in 'survey' worksheet.")
+                print(f"ERROR: Table not found in {worksheet_name} worksheet.")
                 return False
 
             headers = self.get_headers(table)
             try:
-                name_col_index = headers.index("name")
-                prop_col_index = headers.index(property_name)
+                key_col_index = headers.index(key_field_name)
+                prop_col_index = headers.index(property_to_change)
             except ValueError:
-                print(f"ERROR: Column 'name' or '{property_name}' not found in survey headers.")
+                print(f"ERROR: Column 'name' or '{property_to_change}' not found in {worksheet_name} headers.")
                 return False
 
             target_row = None
             rows = table.findall(".//ss:Row", self.namespaces)
 
+            if worksheet_name == "settings":
+                if len(rows) > 1:
+                    target_row = rows[1]
+                else:
+                    print(f" WARN: Row not found in '{worksheet_name}'.")
+                    return False
+
             # Find the target row based on field_name
             for row in rows[1:]:
                 cells = row.findall(".//ss:Cell", self.namespaces)
-                if len(cells) > name_col_index:
-                    cell = cells[name_col_index]
+                if len(cells) > key_col_index:
+                    cell = cells[key_col_index]
                     data_elem = cell.find(".//ss:Data", self.namespaces)
-                    if data_elem is not None and data_elem.text == field_name:
+                    if data_elem is not None and data_elem.text == key_field_value:
                         target_row = row
                         break
 
             if target_row is None:
-                print(f" WARN: Field '{field_name}' not found in survey.")
+                print(f" WARN: Row with {key_field_name} = '{key_field_value}' not found in '{worksheet_name}'.")
                 return False
 
             # Find and update the specific cell for the property
@@ -704,11 +713,11 @@ class XLSFormXMLEditor:
                 data_elem.text = str(new_value)
 
             self.modified = True
-            print(f" Successfully modified property '{property_name}' for field '{field_name}'.")
+            print(f" Successfully modified '{property_to_change}' in worksheet '{worksheet_name}'.")
             return True
 
         except Exception as e:
-            print(f" ERROR in modify_field_property: {str(e)}")
+            print(f"❌ ERROR in modify_field_property: {str(e)}")
             return False
 
     def clone_and_filter_by_equipment(self, new_form_name: str, equipment_to_keep: List[str]) -> Optional[str]:

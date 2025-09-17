@@ -256,18 +256,22 @@ class XLSFormProperAgent:
                 return json.dumps({"success": False, "error": str(e)})
 
         @tool
-        def modify_field_property(field_name: str, property_name: str, new_value: str) -> str:
+        def modify_field_property(
+            worksheet_name: str, key_field_name: str, key_field_value: str, property_to_change: str, new_value: str
+        ) -> str:
             """Modifies a single property of an existing field in the 'survey' worksheet."""
             try:
                 xml_editor = create_xml_editor(self.xml_file_path)
-                success = xml_editor.modify_field_property(field_name, property_name, new_value)
+                success = xml_editor.modify_field_property(
+                    worksheet_name, key_field_name, key_field_value, property_to_change, new_value
+                )
 
                 if success and xml_editor.modified:
                     output_path = xml_editor.save_modified_xml()
                     return json.dumps(
                         {
                             "success": True,
-                            "message": f"Property '{property_name}' for field '{field_name}' was successfully updated.",
+                            "message": f"Property '{property_to_change}' for field '{key_field_name}' in worksheet '{worksheet_name}' was successfully updated.",
                             "modified_file_path": output_path,
                         },
                         indent=2,
@@ -276,7 +280,7 @@ class XLSFormProperAgent:
                     return json.dumps(
                         {
                             "success": False,
-                            "message": f"Failed to modify property '{property_name}' for field '{field_name}'.",
+                            "message": f"Failed to modify property '{property_to_change}' for field '{key_field_name}'. It may not exist in worksheet '{worksheet_name}'.",
                         },
                         indent=2,
                     )
@@ -322,7 +326,7 @@ class XLSFormProperAgent:
             add_row_auto,
             create_task_plan,
             execute_task_plan,
-            analyze_form_structure,
+            # analyze_form_structure,
             delete_field,
             modify_field_property,
             modify_choice,
