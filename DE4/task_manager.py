@@ -311,7 +311,7 @@ class XLSFormTaskManager:
                 failed.append(task)
 
             task.completed_at = datetime.now().isoformat()
-            results.append({"task_id": task.id, "title": task.title, "status": task.status, "result": task.result})
+            results.append({"task_id": task.id, "title": task.title, "status": task.status, "result": task.result, "error": task.error_message})
 
         final_output_path = None
         if editor.modified:
@@ -365,6 +365,33 @@ class XLSFormTaskManager:
         result = {"success": ok}
 
         return result
+    
+    def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
+        worksheet_name = params.get("worksheet_name")
+        key_field_name = params.get("key_field_name")
+        key_field_value = params.get("key_field_value")
+
+        property_to_change = params.get("property_to_change")
+        new_value = params.get("new_value")
+
+        if not all([worksheet_name, key_field_name, key_field_value, property_to_change, new_value is not None]):
+            return {
+                "success": False,
+                "error": "Missing one of required parameters: field_name, property_name, new_value",
+            }
+
+        success = editor.modify_field_property(
+            worksheet_name, key_field_name, key_field_value, property_to_change, new_value
+        )
+        result = {"success": success}
+        if success and editor.modified:
+            result["message"] = (
+                f"Property '{property_to_change}' for field '{key_field_name}' was updated. in sheet {worksheet_name}"
+            )
+        elif not success:
+            result["message"] = f"Could not modify property for field '{key_field_name}' for sheet {worksheet_name}."
+
+        return result
 
     def _handle_analyze_structure(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         from xml_parser import XLSFormParser
@@ -387,33 +414,24 @@ class XLSFormTaskManager:
 
         return result
 
-    def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        worksheet_name = params.get("worksheet_name")
-        key_field_name = params.get("key_field_name")
-        key_field_value = params.get("key_field_value")
+    def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
+            list_name = params.get("list_name")
+            choice_name = params.get("choice_name")
+            prop_name = params.get("property_to_change")
+            new_value = params.get("new_value")
 
-        property_to_change = params.get("property_to_change")
-        new_value = params.get("new_value")
+            if not all([list_name, choice_name, prop_name, new_value is not None]):
+                return {"success": False, "error": "Missing one of required parameters for modify_choice"}
 
-        if not all([worksheet_name, key_field_name, key_field_value, property_to_change, new_value is not None]):
-            return {
-                "success": False,
-                "error": "Missing one of required parameters: field_name, property_name, new_value",
-            }
+            success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
+            result = {"success": success}
 
-        # Find the field by name and modify its property
-        success = editor.modify_field_property(
-            key_field_value, property_to_change, new_value
-        )
-        result = {"success": success}
-        if success and editor.modified:
-            result["message"] = (
-                f"Property '{property_to_change}' for field '{key_field_name}' was updated. in sheet {worksheet_name}"
-            )
-        elif not success:
-            result["message"] = f"Could not modify property for field '{key_field_name}' for sheet {worksheet_name}."
+            if success and editor.modified:
+                result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
+            elif not success:
+                result["message"] = f"Could not modify choice '{choice_name}'."
 
-        return result
+            return result
 
     def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         list_name = params.get("list_name")

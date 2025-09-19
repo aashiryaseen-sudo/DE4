@@ -353,22 +353,29 @@ class XLSFormTaskManager:
         return result
 
     def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        field_name = params.get("field_name")
-        prop_name = params.get("property_name")
+        worksheet_name = params.get("worksheet_name")
+        key_field_name = params.get("key_field_name")
+        key_field_value = params.get("key_field_value")
+
+        property_to_change = params.get("property_to_change")
         new_value = params.get("new_value")
 
-        if not all([field_name, prop_name, new_value is not None]):
+        if not all([worksheet_name, key_field_name, key_field_value, property_to_change, new_value is not None]):
             return {
                 "success": False,
                 "error": "Missing one of required parameters: field_name, property_name, new_value",
             }
 
-        success = editor.modify_field_property(field_name, prop_name, new_value)
+        success = editor.modify_field_property(
+            worksheet_name, key_field_name, key_field_value, property_to_change, new_value
+        )
         result = {"success": success}
         if success and editor.modified:
-            result["message"] = f"Property '{prop_name}' for field '{field_name}' was updated."
+            result["message"] = (
+                f"Property '{property_to_change}' for field '{key_field_name}' was updated. in sheet {worksheet_name}"
+            )
         elif not success:
-            result["message"] = f"Could not modify property for field '{field_name}'."
+            result["message"] = f"Could not modify property for field '{key_field_name}' for sheet {worksheet_name}."
 
         return result
 

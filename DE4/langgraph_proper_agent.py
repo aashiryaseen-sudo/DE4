@@ -33,8 +33,9 @@ class AgentState(TypedDict):
 class XLSFormProperAgent:
     """Proper LangGraph agent implementation for XLSForm editing"""
 
-    def __init__(self, xml_file_path: str):
+    def __init__(self, xml_file_path: str, base_original_path: str = None):
         self.xml_file_path = xml_file_path
+        self.base_original_path = base_original_path or xml_file_path
 
         # Check for OpenAI API key
         if not os.environ.get("OPENAI_API_KEY"):
@@ -67,7 +68,7 @@ class XLSFormProperAgent:
                 }
 
                 # Execute the operation
-                xml_editor = create_xml_editor(self.xml_file_path)
+                xml_editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 execution_result = xml_editor.execute_operation(operation)
 
                 # Save modified XML if changes were made
@@ -89,7 +90,7 @@ class XLSFormProperAgent:
             The tool auto-detects the correct worksheet by headers; saves once.
             """
             try:
-                xml_editor = create_xml_editor(self.xml_file_path)
+                xml_editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 # Split on commas or periods
                 raw_items = [s.strip() for s in re.split(r"[,\.]+", items_csv) if s.strip()]
                 items = [{"label": it, "name": it} for it in raw_items]
@@ -114,7 +115,7 @@ class XLSFormProperAgent:
         def modify_choice(list_name: str, choice_name: str, property_to_change: str, new_value: str) -> str:
             """Modifies an existing choice within a dropdown list."""
             try:
-                xml_editor = create_xml_editor(self.xml_file_path)
+                xml_editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 success = xml_editor.modify_choice_property(list_name, choice_name, property_to_change, new_value)
 
                 if success and xml_editor.modified:
@@ -167,7 +168,7 @@ class XLSFormProperAgent:
         def add_row_auto(target_sheet_hint: str, row_values_csv: str) -> str:
             """Add a row to the best matching worksheet by headers. Args: target_sheet_hint (can be 'settings' or empty), row_values_csv."""
             try:
-                xml_editor = create_xml_editor(self.xml_file_path)
+                xml_editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 values = [s.strip() for s in re.split(r",+", row_values_csv) if s.strip()]
                 result = xml_editor.add_row_to_best_match(values, sheet_hint=target_sheet_hint or None)
                 if result.get("success"):
@@ -226,7 +227,7 @@ class XLSFormProperAgent:
         def delete_field(field_name: str) -> str:
             """Deletes a field (a single row) from the 'survey' worksheet using its unique field name."""
             try:
-                xml_editor = create_xml_editor(self.xml_file_path)
+                xml_editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 success = xml_editor.remove_field_by_name(field_name)
 
                 if success and xml_editor.modified:
@@ -261,7 +262,7 @@ class XLSFormProperAgent:
         ) -> str:
             """Modifies a single property of an existing field in the 'survey' worksheet."""
             try:
-                xml_editor = create_xml_editor(self.xml_file_path)
+                xml_editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 success = xml_editor.modify_field_property(
                     worksheet_name, key_field_name, key_field_value, property_to_change, new_value
                 )
@@ -300,7 +301,7 @@ class XLSFormProperAgent:
                 equipment_list_csv (str): A comma-separated list of the equipment_type values to KEEP.
             """
             try:
-                editor = create_xml_editor(self.xml_file_path)
+                editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
                 equipment_to_keep = [e.strip() for e in equipment_list_csv.split(",") if e.strip()]
 
                 output_path = editor.clone_and_filter_by_equipment(new_form_name, equipment_to_keep)
@@ -446,6 +447,6 @@ class XLSFormProperAgent:
             return {"success": False, "error": str(e), "user_prompt": user_prompt}
 
 
-def create_proper_xlsform_agent(xml_file_path: str):
+def create_proper_xlsform_agent(xml_file_path: str, base_original_path: str = None):
     """Factory function to create the proper XLSForm agent"""
-    return XLSFormProperAgent(xml_file_path)
+    return XLSFormProperAgent(xml_file_path, base_original_path=base_original_path)
