@@ -1,0 +1,263 @@
+-- DE4 Forms Platform - FINAL HYBRID PostgreSQL Schema
+-- This schema combines relational form data with robust user and operations logging.
+
+-- Enable required extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
+-- Create ENUM types from the original script
+CREATE TYPE user_role AS ENUM ('admin', 'manager', 'editor', 'viewer');
+CREATE TYPE request_status AS ENUM ('pending', 'in_progress', 'ready_for_review', 'under_review', 'revision_requested', 'approved', 'deployed', 'cancelled');
+CREATE TYPE operation_type AS ENUM ('create', 'read', 'update', 'delete', 'clone', 'deploy');
+CREATE TYPE session_status AS ENUM ('active', 'expired', 'terminated');
+
+-- =============== USER MANAGEMENT TABLES ===============
+-- Kept from the original script
+
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name VARCHAR(200),
+    role user_role NOT NULL DEFAULT 'viewer',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_login TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE user_sessions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_token VARCHAR(255) UNIQUE NOT NULL,
+    ip_address INET,
+    user_agent TEXT,
+    status session_status NOT NULL DEFAULT 'active',
+    expires_at TIMESTAMP NOT NULL,
+    last_activity TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============== NEW RELATIONAL FORM TABLES ===============
+-- These tables replace the flawed "master_forms" and "form_versions" (blob) tables.
+-- They directly satisfy the SDS requirement for "forms, fields, choices, versions."
+
+-- 1. FORMS TABLE (Master Form Definitions)
+-- Combines metadata from the original master_forms with the new relational structure.
+CREATE TABLE forms (
+    id SERIAL PRIMARY KEY,
+    form_id_string VARCHAR(255) UNIQUE NOT NULL, -- The unique text ID, e.g., "EMCOR_ABC_PM"
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    tags JSONB,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_template BOOLEAN NOT NULL DEFAULT TRUE,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    current_version_id INTEGER, -- Points to the currently "live" version (set later)
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. FORM VERSIONS TABLE
+-- Tracks a specific version of a form. This table does NOT contain XML.
+CREATE TABLE form_versions (
+    id SERIAL PRIMARY KEY,
+    form_id INTEGER NOT NULL REFERENCES forms(id) ON DELETE CASCADE,
+    version_string VARCHAR(50) NOT NULL, -- e.g., "v1.0", "v1.1-PV"
+    notes TEXT,
+    created_by INTEGER REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(form_id, version_string)
+);
+
+-- Add the circular foreign key constraint after both tables exist
+ALTER TABLE forms
+ADD CONSTRAINT fk_current_version
+FOREIGN KEY (current_version_id) 
+REFERENCES form_versions(id) 
+ON DELETE SET NULL;
+
+-- 3. FORM FIELDS TABLE (The 'survey' sheet data)
+-- This is the core table for storing each question/field.
+CREATE TABLE form_fields (
+    id SERIAL PRIMARY KEY,
+    form_version_id INTEGER NOT NULL REFERENCES form_versions(id) ON DELETE CASCADE,
+
+    -- Core Fields
+    name VARCHAR(255) NOT NULL,
+    type VARCHAR(255) NOT NULL,
+    label TEXT,
+    appearance TEXT,
+
+    -- Logic & Validation Fields
+    required BOOLEAN DEFAULT FALSE,
+    relevant TEXT,
+    hint TEXT,
+    constraint_formula TEXT, -- Corresponds to 'constraint' in the spec
+    constraint_message TEXT,
+    calculation TEXT,
+    read_only BOOLEAN DEFAULT FALSE,
+    default_value TEXT, -- Corresponds to 'default' in the spec
+
+    -- Grouping
+    repeat_count TEXT,
+
+    -- Deprecated Media Fields (added as TEXT for schema completeness)
+    image TEXT NULL,
+    audio TEXT NULL,
+    "media::audio" TEXT NULL, -- Use double quotes for the :: syntax
+    "media::video" TEXT NULL,
+
+    -- DigiMEP & Asset Management Fields
+    timestamp_req BOOLEAN DEFAULT FALSE,
+    include_in_building_profiles BOOLEAN DEFAULT FALSE,
+    equipment_type VARCHAR(100),
+    equipment_code VARCHAR(100),
+
+    -- Riptide/Brainbox API Fields
+    fetch_data_from_riptide BOOLEAN DEFAULT FALSE,
+    fetch_data_for_field_name BOOLEAN DEFAULT FALSE,
+    riptide_api_prop_name TEXT NULL,
+    fetch_unit_tag_from_field_name TEXT NULL,
+    fetch_heat_type_from_field_name TEXT NULL,
+    fetch_priority_array_from_riptide BOOLEAN DEFAULT FALSE,
+    riptide_timed_override BOOLEAN DEFAULT FALSE,
+    fetch_override_temp_from_field_name TEXT NULL,
+    cancel_riptide_timed_override BOOLEAN DEFAULT FALSE,
+
+    -- Report & Display Fields
+    constraint_check BOOLEAN DEFAULT TRUE, -- Default to TRUE (prevent upload) per the spec
+    field_order INTEGER, -- Corresponds to 'order' in the spec
+    alias TEXT NULL,
+
+    -- Constraints
+    UNIQUE(form_version_id, name) -- Ensures no duplicate field names within one form version
+);
+
+-- 4. FORM CHOICES TABLE (The 'select_one' and 'select_multiple' data)
+-- Stores all dropdown/checkbox options for all forms.
+CREATE TABLE form_choices (
+    id SERIAL PRIMARY KEY,
+    form_version_id INTEGER NOT NULL REFERENCES form_versions(id) ON DELETE CASCADE,
+    list_name VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL, -- The internal value
+    label TEXT, -- The human-readable label
+    UNIQUE(form_version_id, list_name, name)
+);
+
+
+-- =============== CUSTOMIZATION & OPERATIONS TABLES ===============
+-- Kept from the original script, but MODIFIED to link to the new 'forms' table.
+
+CREATE TABLE customization_requests (
+    id SERIAL PRIMARY KEY,
+    request_id VARCHAR(100) UNIQUE NOT NULL,
+    client_name VARCHAR(200) NOT NULL,
+    form_title VARCHAR(200) NOT NULL,
+    
+    -- MODIFIED: This now points to the new 'forms' table
+    master_form_id INTEGER NOT NULL REFERENCES forms(id), 
+    
+    raw_request TEXT NOT NULL,
+    parsed_requirements JSONB,
+    selected_equipment_types JSONB,
+    field_additions JSONB,
+    field_removals JSONB,
+    field_modifications JSONB,
+    choice_modifications JSONB,
+    status request_status NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 3 CHECK (priority >= 1 AND priority <= 5),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    assigned_to INTEGER REFERENCES users(id),
+    reviewed_by INTEGER REFERENCES users(id),
+    processing_started_at TIMESTAMP,
+    processing_completed_at TIMESTAMP,
+    
+    -- This correctly points to the new 'form_versions' table
+    generated_form_version_id INTEGER REFERENCES form_versions(id), 
+    
+    review_notes JSONB,
+    iteration_count INTEGER NOT NULL DEFAULT 0,
+    errors_encountered JSONB,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE form_operations (
+    id SERIAL PRIMARY KEY,
+    operation_id VARCHAR(100) UNIQUE NOT NULL,
+    operation_type operation_type NOT NULL,
+    operation_description VARCHAR(500) NOT NULL,
+    target_type VARCHAR(50) NOT NULL, 
+    target_id VARCHAR(100),
+    target_name VARCHAR(200),
+    
+    -- MODIFIED: This now points to the new 'forms' table
+    master_form_id INTEGER REFERENCES forms(id),
+    
+    -- This correctly points to the new 'form_versions' table
+    form_version_id INTEGER REFERENCES form_versions(id),
+    
+    customization_request_id INTEGER REFERENCES customization_requests(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    session_id INTEGER REFERENCES user_sessions(id),
+    before_data JSONB,
+    after_data JSONB,
+    operation_parameters JSONB,
+    success BOOLEAN NOT NULL,
+    error_message TEXT,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+-- =============== INDEXES FOR PERFORMANCE ===============
+
+-- Indexes for User tables
+CREATE INDEX idx_users_username ON users(username);
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_user_sessions_token ON user_sessions(session_token);
+CREATE INDEX idx_user_sessions_user_status ON user_sessions(user_id, status);
+
+-- Indexes for NEW relational form tables
+CREATE INDEX idx_forms_form_id_string ON forms(form_id_string);
+CREATE INDEX idx_form_versions_master_form ON form_versions(form_id);
+CREATE INDEX idx_fields_form_version ON form_fields(form_version_id);
+CREATE INDEX idx_fields_name ON form_fields(name);
+CREATE INDEX idx_choices_form_version ON form_choices(form_version_id);
+CREATE INDEX idx_choices_list_name ON form_choices(list_name);
+
+-- Indexes for Logging and Customization tables
+CREATE INDEX idx_customization_requests_status ON customization_requests(status);
+CREATE INDEX idx_customization_requests_assigned_to ON customization_requests(assigned_to);
+CREATE INDEX idx_customization_requests_priority ON customization_requests(priority);
+CREATE INDEX idx_form_operations_type ON form_operations(operation_type);
+CREATE INDEX idx_form_operations_user ON form_operations(user_id);
+CREATE INDEX idx_form_operations_target ON form_operations(target_type, target_id);
+
+-- =============== TRIGGERS FOR UPDATED_AT ===============
+
+-- Function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Apply trigger to tables that need it
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_forms_updated_at BEFORE UPDATE ON forms
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_customization_requests_updated_at BEFORE UPDATE ON customization_requests
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+COMMIT;
+
+-- Display success message
+SELECT 'DE4 Hybrid Relational Schema created successfully!' as status;
