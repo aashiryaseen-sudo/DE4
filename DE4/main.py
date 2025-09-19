@@ -522,8 +522,9 @@ async def get_admin_dashboard(
             FormVersion.file_size,
             FormVersion.created_by,
             FormVersion.change_summary,
-            FormVersion.created_at
-        ).order_by(FormVersion.created_at.desc()).limit(20)
+            FormVersion.created_at,
+            MasterForm.name
+        ).join(MasterForm, FormVersion.master_form_id == MasterForm.id).order_by(FormVersion.created_at.desc()).limit(20)
         form_versions = []
         for version in versions_query:
             form_versions.append({
@@ -536,7 +537,7 @@ async def get_admin_dashboard(
                 "created_by": version.created_by,
                 "change_summary": version.change_summary,
                 "created_at": version.created_at.isoformat(),
-                "master_form_name": f"Form {version.master_form_id}",
+                "master_form_name": version.name,  # Use actual master form name
                 "has_xml_content": True  # Assume true for now
             })
         print(f"📋 Found {len(form_versions)} form versions")
@@ -780,11 +781,23 @@ async def download_form_version(
         if not version:
             raise HTTPException(status_code=404, detail="Form version not found")
         
-        if not version.xml_content:
-            raise HTTPException(status_code=404, detail="No XML content available")
+        # Check if admin user has access to this version (admin can access all, but let's be safe)
+        print(f"🔍 Downloading version {version_id} - created_by: {version.created_by}, admin_user: {admin_user.id}")
         
-        # Generate filename
-        filename = f"{version.master_form.name}_{version.version}.xml" if version.master_form else f"form_version_{version_id}.xml"
+        if not version.xml_content or len(version.xml_content.strip()) == 0:
+            print(f"❌ Form version {version_id} has empty XML content (length: {len(version.xml_content) if version.xml_content else 0})")
+            print(f"🔍 Version details: created_by={version.created_by}, version={version.version}, created_at={version.created_at}")
+            raise HTTPException(status_code=404, detail="No XML content available in this form version")
+        
+        print(f"✅ Form version {version_id} has XML content (length: {len(version.xml_content)})")
+        
+        # Generate filename - avoid relationship access
+        master_form_name = "Unknown"
+        if version.master_form_id:
+            master = db.query(MasterForm).filter(MasterForm.id == version.master_form_id).first()
+            master_form_name = master.name if master else f"Form_{version.master_form_id}"
+        
+        filename = f"{master_form_name}_{version.version}.xml"
         
         # Log download
         get_operation_logger().log_operation(
@@ -804,7 +817,7 @@ async def download_form_version(
             media_type="application/xml",
             headers={
                 "Content-Disposition": f"attachment; filename={filename}",
-                "X-Form-Name": version.master_form.name if version.master_form else "Unknown",
+                "X-Form-Name": master_form_name,
                 "X-Version": version.version,
                 "X-Created-By": str(version.created_by) if version.created_by else "Unknown"
             }
@@ -841,6 +854,7 @@ async def purge_database(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Purge error: {str(e)}")
+
 
 @app.put("/api/admin/users/{user_id}/role")
 async def update_user_role(
@@ -1129,6 +1143,25 @@ async def ai_edit_endpoint(
         result = await agent.process_prompt(enhanced_prompt)
         print(f"🔍 AI edit result: {result}")
         
+        # Check if the agent created a modified file
+        modified_file_created = False
+        latest_modified = None
+        
+        # Look for modified files created by the agent
+        import glob
+        original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
+        pattern = str(Path(user_form_session.original_file_path).parent / f"modified_{original_name}_*.xml")
+        print(f"🔍 Looking for modified files with pattern: {pattern}")
+        modified_files = glob.glob(pattern)
+        print(f"🔍 Found {len(modified_files)} modified files: {modified_files}")
+        
+        if modified_files:
+            latest_modified = max(modified_files, key=os.path.getctime)
+            modified_file_created = True
+            print(f"✅ Using latest modified file: {latest_modified}")
+        else:
+            print(f"🔍 No modified files found, will check for task-based edits")
+        
         # Store the prompt in edit history
         edit_history = user_form_session.edit_history_json or []
         edit_history.append({
@@ -1140,64 +1173,56 @@ async def ai_edit_endpoint(
         })
         user_form_session.edit_history_json = edit_history
 
-        if result["success"]:
-            # Check for modified file
-            modified_file_created = False
-            # Locate latest modified file next to original
-            import glob
-            original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
-            pattern = str(Path(user_form_session.original_file_path).parent / f"modified_{original_name}_*.xml")
-            print(f"🔍 Looking for modified files with pattern: {pattern}")
-            modified_files = glob.glob(pattern)
-            print(f"🔍 Found {len(modified_files)} modified files: {modified_files}")
-            latest_modified = None
-            if modified_files:
-                latest_modified = max(modified_files, key=os.path.getctime)
-                modified_file_created = True
-                print(f"✅ Using latest modified file: {latest_modified}")
 
-            # Check for success indicators
-            success_indicators = [
-                "successfully added",
-                "added choice option",
-                "modified_file_path",
-                "_modified.xml",
-                "backup_created",
-            ]
+        # Check for success indicators
+        success_indicators = [
+            "successfully added",
+            "added choice option",
+            "modified_file_path",
+            "_modified.xml",
+            "backup_created",
+        ]
 
-            response_lower = result["agent_response"].lower()
-            actual_success = any(indicator.lower() in response_lower for indicator in success_indicators)
-
-            # Require tool calls and modified file for success
-            tool_calls_made = int(result.get("tool_calls_made", 0) or 0)
-            agent_response = result.get("agent_response", "")
-            
-            # Check for successful task execution in the response
-            has_successful_tasks = any([
-                '"status": "completed"' in agent_response,
-                '"completed_tasks"' in agent_response,
-                'Successfully completed' in agent_response,
-                '✅' in agent_response,
-                '"execution_completed": true' in agent_response
-            ])
-            
-            if tool_calls_made == 0 and not has_successful_tasks:
-                raise HTTPException(status_code=422, detail="AI did not execute tools or no modified file was produced")
-
-            # Persist changes to user form session
-            history = user_form_session.edit_history_json or []
-            # Determine if changes were actually applied
-            changes_applied = modified_file_created or has_successful_tasks
-            success = changes_applied or actual_success
-            
-            history.append({
-                "timestamp": datetime.now().isoformat(),
-                "prompt": prompt,
-                "target_sheet": target_sheet,
-                "success": success,
-                "changes_applied": changes_applied,
-            })
-            user_form_session.edit_history_json = history
+        response_lower = result["agent_response"].lower()
+        tool_calls_made = int(result.get("tool_calls_made", 0) or 0)
+        agent_response = result.get("agent_response", "")
+        
+        # Check for successful task execution in the response
+        has_successful_tasks = any([
+            '"status": "completed"' in agent_response,
+            '"completed_tasks"' in agent_response,
+            'Successfully completed' in agent_response,
+            '✅' in agent_response,
+            '"execution_completed": true' in agent_response
+        ])
+        
+        # Check for failure indicators in the response
+        has_failure_indicators = any([
+            'could not be completed' in agent_response.lower(),
+            'was not found' in agent_response.lower(),
+            'not found' in agent_response.lower(),
+            'error' in agent_response.lower(),
+            'failed' in agent_response.lower(),
+            'unable to' in agent_response.lower()
+        ])
+        
+        # Determine if changes were actually applied
+        changes_applied = modified_file_created or (has_successful_tasks and not has_failure_indicators)
+        actual_success = changes_applied and (tool_calls_made > 0 or has_successful_tasks) and not has_failure_indicators
+        
+        # Update history regardless of success/failure
+        history = user_form_session.edit_history_json or []
+        history.append({
+            "timestamp": datetime.now().isoformat(),
+            "prompt": prompt,
+            "target_sheet": target_sheet,
+            "success": actual_success,
+            "changes_applied": changes_applied,
+        })
+        user_form_session.edit_history_json = history
+        
+        # Only proceed with success path if we actually have changes
+        if actual_success:
             if latest_modified:
                 # Store absolute path to ensure export can find it
                 user_form_session.modified_file_path = os.path.abspath(latest_modified)
@@ -1215,16 +1240,58 @@ async def ai_edit_endpoint(
                 # Derive a stable form name from original filename (without extension)
                 form_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
 
-                # Read modified XML content
-                modified_path = user_form_session.modified_file_path or working_file
+                # Read XML content from the appropriate source
                 xml_content = ""
-                try:
-                    with open(modified_path, "r", encoding="utf-8") as xf:
-                        xml_content = xf.read()
-                    print(f"📄 Read XML content: {len(xml_content)} characters from {modified_path}")
-                except Exception as e:
-                    print(f"❌ Failed to read XML content from {modified_path}: {str(e)}")
-                    pass
+                
+                if latest_modified and os.path.exists(latest_modified):
+                    # Use the modified file created by the agent
+                    try:
+                        with open(latest_modified, "r", encoding="utf-8") as xf:
+                            xml_content = xf.read()
+                        print(f"✅ Read modified XML content from file: {len(xml_content)} characters from {latest_modified}")
+                    except Exception as e:
+                        print(f"❌ Failed to read modified file {latest_modified}: {str(e)}")
+                        raise HTTPException(status_code=500, detail="Failed to read modified XML content")
+                else:
+                    # Check if this is a task-based edit (no file created but changes made)
+                    has_successful_tasks = any([
+                        '"status": "completed"' in result.get("agent_response", ""),
+                        '"completed_tasks"' in result.get("agent_response", ""),
+                        'Successfully completed' in result.get("agent_response", ""),
+                        '✅' in result.get("agent_response", ""),
+                        '"execution_completed": true' in result.get("agent_response", "")
+                    ])
+                    
+                    if has_successful_tasks:
+                        # For task-based edits, we need to get the XML from the original file
+                        # since no physical file was created but changes were made in memory
+                        print(f"🔍 Task-based edit detected, reading from original file: {working_file}")
+                        try:
+                            with open(working_file, "r", encoding="utf-8") as xf:
+                                xml_content = xf.read()
+                            print(f"📄 Read XML content from original file: {len(xml_content)} characters")
+                        except Exception as e:
+                            print(f"❌ Failed to read original file {working_file}: {str(e)}")
+                            raise HTTPException(status_code=500, detail="Failed to read XML content for database storage")
+                    else:
+                        # No modifications were made, use original file
+                        print(f"🔍 No modifications detected, using original file: {working_file}")
+                        try:
+                            with open(working_file, "r", encoding="utf-8") as xf:
+                                xml_content = xf.read()
+                            print(f"📄 Read XML content from original file: {len(xml_content)} characters")
+                        except Exception as e:
+                            print(f"❌ Failed to read original file {working_file}: {str(e)}")
+                            raise HTTPException(status_code=500, detail="Failed to read XML content for database storage")
+                
+                # Ensure we have XML content
+                if not xml_content or len(xml_content.strip()) == 0:
+                    print(f"❌ XML content is empty or whitespace only (length: {len(xml_content)})")
+                    print(f"🔍 DEBUG: This means the AI edit did not create any modifications")
+                    raise HTTPException(status_code=500, detail="No XML content available to save to database")
+                
+                print(f"✅ XML content ready for database storage: {len(xml_content)} characters")
+                print(f"🔍 DEBUG: XML starts with: {xml_content[:100]}...")
 
                 # Find or create master form
                 master_form = db.query(MasterForm).filter(MasterForm.name == form_name).first()
@@ -1255,8 +1322,8 @@ async def ai_edit_endpoint(
                         form_structure=None,
                         field_names=None,
                         choice_lists=None,
-                        file_path=modified_path,
-                        file_size=os.path.getsize(modified_path) if os.path.exists(modified_path) else None,
+                        file_path=latest_modified if latest_modified else "task_based_edit",
+                        file_size=os.path.getsize(latest_modified) if latest_modified and os.path.exists(latest_modified) else None,
                         file_checksum=None,
                         created_by=current_user.id,
                         change_summary=f"AI edit: {prompt[:50]}..." if len(prompt) > 50 else f"AI edit: {prompt}",
@@ -1266,6 +1333,17 @@ async def ai_edit_endpoint(
                     db.add(new_version)
                     db.commit()
                     print(f"✅ Saved version to DB: {new_version.version} with {len(xml_content)} characters")
+                    print(f"🔍 DEBUG: XML content preview: {xml_content[:200]}...")
+                    
+                    # Verify what was actually saved
+                    saved_version = db.query(FormVersion).filter(FormVersion.id == new_version.id).first()
+                    if saved_version:
+                        saved_xml_len = len(saved_version.xml_content) if saved_version.xml_content else 0
+                        print(f"🔍 DEBUG: Verified saved XML length: {saved_xml_len}")
+                        if saved_xml_len == 0:
+                            print(f"❌ WARNING: XML content was not saved properly!")
+                    else:
+                        print(f"❌ ERROR: Could not retrieve saved version from DB")
 
             except Exception as e:
                 print(f"❌ Failed to save version to DB: {str(e)}")
@@ -1289,7 +1367,7 @@ async def ai_edit_endpoint(
                     from database_schema import CustomizationRequest, RequestStatus
                     req = db.query(CustomizationRequest).get(customization_request_id)
                     if req:
-                        req.status = RequestStatus.APPROVED.value if success else RequestStatus.REVISION_REQUESTED.value
+                        req.status = RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
                         req.processing_completed_at = datetime.utcnow()
                         db.add(req)
                         db.commit()
@@ -1327,7 +1405,9 @@ async def ai_edit_endpoint(
                 "edited_by": current_user.username
             }
         else:
-            # Log failed AI edit
+            # AI edit failed - no changes were applied
+            db.commit()  # Commit the history update
+            
             # Update customization request as failed
             try:
                 if customization_request_id:
@@ -1350,10 +1430,10 @@ async def ai_edit_endpoint(
                 target_name=current_uploaded_file,
                 user_id=current_user.id,
                 success=False,
-                error_message=result["error"],
+                error_message=result.get("error", "No changes were applied"),
                 after_data={"customization_request_id": customization_request_id}
             )
-            return {"success": False, "error": result["error"], "prompt": prompt, "target_sheet": target_sheet}
+            return {"success": False, "error": result.get("error", "No changes were applied"), "prompt": prompt, "target_sheet": target_sheet}
 
     except Exception as e:
         # Log exception
@@ -1408,7 +1488,7 @@ async def export_xml(
         raise HTTPException(status_code=400, detail="No edited file to export. Run AI Edit first.")
 
     try:
-        # First try to export from DB-stored form version content
+        # Export from DB-stored form version content ONLY
         from database_schema import MasterForm, FormVersion
 
         original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
@@ -1416,57 +1496,31 @@ async def export_xml(
         file_type = "modified"
         xml_content: str = None
 
+        # Find master form
         master = db.query(MasterForm).filter(MasterForm.name == original_name).first()
-        if master:
-            print(f"🔍 Found master form: {master.name} (ID: {master.id})")
-            # Prefer latest by created_at (drafts) created by the current user
-            version = (
-                db.query(FormVersion)
-                .filter(FormVersion.master_form_id == master.id)
-                .filter(FormVersion.created_by == current_user.id)
-                .order_by(FormVersion.created_at.desc())
-                .first()
-            )
-            if version and version.xml_content:
-                print(f"✅ Exporting from DB: version {version.version} (created: {version.created_at})")
-                # Create filename with original name + timestamp
-                export_filename = f"{original_name}_{version.version}.xml"
-                xml_content = version.xml_content
-            else:
-                print(f"⚠️  No DB version found for user {current_user.id}")
-        else:
-            print(f"⚠️  No master form found for '{original_name}'")
-
-        if xml_content is None:
-            # Fallback to filesystem path resolution
-            print(f"🔄 Falling back to filesystem for export")
-            print(f"🔍 Modified file path: {user_form_session.modified_file_path}")
-            export_file_path = user_form_session.modified_file_path
-            if export_file_path == "task_based_edit" or not os.path.isabs(export_file_path):
-                import glob
-                original_dir = os.path.dirname(os.path.abspath(user_form_session.original_file_path))
-                pattern = os.path.join(original_dir, f"modified_{original_name}_*.xml")
-                candidates = glob.glob(pattern)
-                if candidates:
-                    export_file_path = max(candidates, key=os.path.getctime)
-                    print(f"📁 Found filesystem file: {export_file_path}")
-            if not os.path.exists(export_file_path):
-                raise HTTPException(status_code=404, detail="Edited XML file not found")
-
-            filename = os.path.basename(user_form_session.original_file_path)
-            export_filename = f"edited_{filename}"
-
-            return FileResponse(
-                export_file_path,
-                media_type="application/xml",
-                filename=export_filename,
-                headers={
-                    "Content-Disposition": f"attachment; filename={export_filename}",
-                    "X-File-Type": file_type,
-                    "X-Has-Modifications": "true",
-                    "X-Exported-By": current_user.username,
-                },
-            )
+        if not master:
+            raise HTTPException(status_code=404, detail=f"Master form '{original_name}' not found in database")
+        
+        print(f"🔍 Found master form: {master.name} (ID: {master.id})")
+        
+        # Get latest version created by current user
+        version = (
+            db.query(FormVersion)
+            .filter(FormVersion.master_form_id == master.id)
+            .filter(FormVersion.created_by == current_user.id)
+            .order_by(FormVersion.created_at.desc())
+            .first()
+        )
+        
+        if not version:
+            raise HTTPException(status_code=404, detail="No edited version found. Please run AI Edit first.")
+        
+        if not version.xml_content:
+            raise HTTPException(status_code=404, detail="No XML content available in the edited version")
+        
+        print(f"✅ Exporting from DB: version {version.version} (created: {version.created_at})")
+        export_filename = f"{original_name}_{version.version}.xml"
+        xml_content = version.xml_content
 
         # Return DB content as file download
         print(f"📄 Serving XML from DB: {len(xml_content)} characters, filename: {export_filename}")
@@ -1479,6 +1533,8 @@ async def export_xml(
                 "X-File-Type": file_type,
                 "X-Has-Modifications": "true",
                 "X-Exported-By": current_user.username,
+                "X-Version": version.version,
+                "X-Created-At": version.created_at.isoformat()
             },
         )
 
@@ -1486,24 +1542,12 @@ async def export_xml(
         operation_logger = get_operation_logger()
         operation_logger.log_operation(
             operation_type=OperationType.READ,
-            description=f"File exported: {export_filename}",
+            description=f"File exported from DB: {export_filename}",
             target_type="file_export",
             target_name=export_filename,
             user_id=current_user.id,
             success=True,
-            after_data={"file_type": file_type, "has_modifications": True}
-        )
-
-        return FileResponse(
-            export_file_path,
-            media_type="application/xml",
-            filename=export_filename,
-            headers={
-                "Content-Disposition": f"attachment; filename={export_filename}",
-                "X-File-Type": file_type,
-                "X-Has-Modifications": "true",
-                "X-Exported-By": current_user.username,
-            },
+            after_data={"file_type": file_type, "has_modifications": True, "source": "database"}
         )
 
     except HTTPException:
@@ -1604,13 +1648,16 @@ async def get_status(
         if not modified_file_display:
             modified_file_display = ufs.modified_file_path
     
+    # Count only successful edits (same logic as AI edit endpoint)
+    successful_edits = [edit for edit in history if edit.get("success", False)]
+    
     return {
         "has_file_uploaded": True,
         "original_file": ufs.original_file_path,
         "modified_file": modified_file_display,
-        "has_modifications": ufs.modified_file_path is not None,
+        "has_modifications": len(successful_edits) > 0,  # Only true if there are successful edits
         "worksheets": worksheets,
-        "total_edits": len(history),
+        "total_edits": len(successful_edits),  # Only count successful edits
         "edit_history": history[-5:],
         "timestamp": datetime.now().isoformat(),
     }

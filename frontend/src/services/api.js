@@ -73,6 +73,9 @@ export const fileAPI = {
 // Admin API
 export const adminAPI = {
   getDashboard: () => api.get('/api/admin/dashboard'),
+  // User management
+  getUsers: () => api.get('/api/admin/users'),
+  updateUserRole: (userId, role) => api.put(`/api/admin/users/${userId}/role`, { role }),
 };
 
 export default api;

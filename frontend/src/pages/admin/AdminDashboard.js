@@ -9,7 +9,12 @@ import {
   XCircle,
   AlertCircle,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  Shield,
+  Edit3,
+  Save,
+  X,
+  Clock
 } from 'lucide-react';
 import { Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import toast from 'react-hot-toast';
@@ -18,6 +23,12 @@ const AdminDashboard = () => {
   const [dashboardData, setDashboardData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  
+  // User management state
+  const [users, setUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+  const [newRole, setNewRole] = useState('');
 
   useEffect(() => {
     fetchDashboardData();
@@ -42,6 +53,70 @@ const AdminDashboard = () => {
 
   const handleRefresh = () => {
     fetchDashboardData(true);
+  };
+
+  // User management functions
+  const fetchUsers = async () => {
+    setUsersLoading(true);
+    try {
+      const response = await adminAPI.getUsers();
+      setUsers(response.data.users);
+    } catch (error) {
+      console.error('Failed to fetch users:', error);
+      toast.error('Failed to load users');
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  const handleEditUser = (user) => {
+    setEditingUser(user);
+    setNewRole(user.role);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingUser(null);
+    setNewRole('');
+  };
+
+  const handleSaveRole = async () => {
+    if (!editingUser || !newRole) return;
+    
+    try {
+      await adminAPI.updateUserRole(editingUser.id, newRole);
+      toast.success(`User role updated to ${newRole}`);
+      
+      // Update local state
+      setUsers(users.map(user => 
+        user.id === editingUser.id 
+          ? { ...user, role: newRole }
+          : user
+      ));
+      
+      setEditingUser(null);
+      setNewRole('');
+    } catch (error) {
+      console.error('Failed to update user role:', error);
+      toast.error(error.response?.data?.detail || 'Failed to update user role');
+    }
+  };
+
+  const getRoleColor = (role) => {
+    switch (role) {
+      case 'admin': return 'bg-red-100 text-red-800';
+      case 'editor': return 'bg-blue-100 text-blue-800';
+      case 'viewer': return 'bg-gray-100 text-gray-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const getRoleIcon = (role) => {
+    switch (role) {
+      case 'admin': return <Shield className="h-4 w-4" />;
+      case 'editor': return <Edit3 className="h-4 w-4" />;
+      case 'viewer': return <Users className="h-4 w-4" />;
+      default: return <Users className="h-4 w-4" />;
+    }
   };
 
   if (loading) {
@@ -70,9 +145,23 @@ const AdminDashboard = () => {
     { name: 'Failed', value: stats.failed_operations, color: '#EF4444' }
   ];
 
+  // Calculate actual status counts from the data
+  const statusCounts = customization_requests.reduce((acc, req) => {
+    const status = req.status;
+    if (status === 'approved' || status === 'deployed') {
+      acc.completed = (acc.completed || 0) + 1;
+    } else if (status === 'revision_requested' || status === 'cancelled') {
+      acc.failed = (acc.failed || 0) + 1;
+    } else {
+      acc.pending = (acc.pending || 0) + 1;
+    }
+    return acc;
+  }, {});
+
   const requestsData = [
-    { name: 'Failed', value: stats.pending_requests, color: '#EF4444' },
-    { name: 'Completed', value: stats.customization_requests - stats.pending_requests, color: '#10B981' }
+    { name: 'Failed', value: statusCounts.failed || 0, color: '#EF4444' },
+    { name: 'Completed', value: statusCounts.completed || 0, color: '#10B981' },
+    { name: 'Pending', value: statusCounts.pending || 0, color: '#F59E0B' }
   ];
 
   const getStatusBadge = (status) => {
@@ -128,7 +217,7 @@ const AdminDashboard = () => {
               <div className="ml-4">
                 <p className="text-sm font-medium text-gray-500">Total Users</p>
                 <p className="text-2xl font-bold text-gray-900">{stats.users}</p>
-                <p className="text-xs text-gray-500">{stats.active_sessions} active sessions</p>
+                <p className="text-xs text-gray-500">{stats.active_sessions} online now</p>
               </div>
             </div>
           </div>
@@ -273,7 +362,7 @@ const AdminDashboard = () => {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {master_forms.slice(0, 5).map((form) => (
+                  {master_forms.map((form) => (
                     <tr key={form.id}>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div>
@@ -430,9 +519,6 @@ const AdminDashboard = () => {
                     Role
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    IP Address
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Last Activity
                   </th>
                 </tr>
@@ -448,9 +534,6 @@ const AdminDashboard = () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="badge badge-blue capitalize">{session.user_role}</span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {session.ip_address || 'Unknown'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {new Date(session.last_activity).toLocaleString()}
@@ -516,6 +599,144 @@ const AdminDashboard = () => {
               </tbody>
             </table>
           </div>
+        </div>
+
+        {/* User Management Section */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center space-x-2">
+              <Users className="h-6 w-6 text-primary-600" />
+              <h2 className="text-xl font-semibold text-gray-900">User Management</h2>
+            </div>
+            <button
+              onClick={fetchUsers}
+              disabled={usersLoading}
+              className="flex items-center space-x-2 px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+            >
+              {usersLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4" />
+              )}
+              <span>Refresh Users</span>
+            </button>
+          </div>
+
+          {usersLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+            </div>
+          ) : users.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              <Users className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+              <p>No users found</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      User
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Role
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Created
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Last Login
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {users.map((user) => (
+                    <tr key={user.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0 h-10 w-10">
+                            <div className="h-10 w-10 rounded-full bg-primary-100 flex items-center justify-center">
+                              <span className="text-sm font-medium text-primary-600">
+                                {user.full_name ? user.full_name.charAt(0).toUpperCase() : user.username.charAt(0).toUpperCase()}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <div className="text-sm font-medium text-gray-900">
+                              {user.full_name || user.username}
+                            </div>
+                            <div className="text-sm text-gray-500">{user.email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {editingUser?.id === user.id ? (
+                          <select
+                            value={newRole}
+                            onChange={(e) => setNewRole(e.target.value)}
+                            className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-primary-500 focus:border-primary-500 sm:text-sm"
+                          >
+                            <option value="admin">Admin</option>
+                            <option value="editor">Editor</option>
+                            <option value="viewer">Viewer</option>
+                          </select>
+                        ) : (
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getRoleColor(user.role)}`}>
+                            {getRoleIcon(user.role)}
+                            <span className="ml-1 capitalize">{user.role}</span>
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {user.created_at ? new Date(user.created_at).toLocaleDateString() : 'N/A'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {user.last_login ? (
+                          <div>
+                            <div>{new Date(user.last_login).toLocaleDateString()}</div>
+                            <div className="text-xs text-gray-400">
+                              {new Date(user.last_login).toLocaleTimeString()}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-gray-400 italic">Never</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        {editingUser?.id === user.id ? (
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={handleSaveRole}
+                              className="text-green-600 hover:text-green-900"
+                            >
+                              <Save className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="text-red-600 hover:text-red-900"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => handleEditUser(user)}
+                            className="text-primary-600 hover:text-primary-900"
+                          >
+                            <Edit3 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>
