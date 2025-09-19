@@ -156,6 +156,23 @@ class AdminDashboardResponse(BaseModel):
 class UpdateUserRoleRequest(BaseModel):
     role: str
 
+class MasterFormUpsertRequest(BaseModel):
+    name: str
+    current_version: str
+    description: Optional[str] = ""
+    form_type: Optional[str] = "General"
+    client_category: Optional[str] = None
+    equipment_types: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
+    is_active: Optional[bool] = True
+    is_template: Optional[bool] = True
+    access_level: Optional[str] = "public"
+    file_size: Optional[int] = None
+    file_checksum: Optional[str] = None
+
+class PurgeConfirmRequest(BaseModel):
+    confirm: bool
+
 # CustomizationRequest removed - using user prompts instead
 
 # Global storage for current form
@@ -494,8 +511,19 @@ async def get_admin_dashboard(
                 "updated_at": form.updated_at.isoformat()
             })
         
-        # Get form versions
-        versions_query = session.query(FormVersion).order_by(FormVersion.created_at.desc()).limit(100)
+        # Get form versions - LIGHTWEIGHT METADATA ONLY
+        print("🔍 Starting form versions query...")
+        versions_query = session.query(
+            FormVersion.id,
+            FormVersion.master_form_id,
+            FormVersion.version,
+            FormVersion.is_current,
+            FormVersion.is_published,
+            FormVersion.file_size,
+            FormVersion.created_by,
+            FormVersion.change_summary,
+            FormVersion.created_at
+        ).order_by(FormVersion.created_at.desc()).limit(20)
         form_versions = []
         for version in versions_query:
             form_versions.append({
@@ -508,39 +536,52 @@ async def get_admin_dashboard(
                 "created_by": version.created_by,
                 "change_summary": version.change_summary,
                 "created_at": version.created_at.isoformat(),
-                "master_form_name": version.master_form.name if version.master_form else None
+                "master_form_name": f"Form {version.master_form_id}",
+                "has_xml_content": True  # Assume true for now
             })
+        print(f"📋 Found {len(form_versions)} form versions")
         
-        # Get user prompts from edit history as "requests"
-        user_form_sessions = session.query(UserFormSession).all()
-        all_prompts = []
-        for session_obj in user_form_sessions:
-            if session_obj.edit_history_json:
-                for edit in session_obj.edit_history_json:
-                    all_prompts.append({
-                        "id": f"{session_obj.id}_{len(all_prompts)}",
-                        "prompt": edit.get("prompt", ""),
-                        "target_sheet": edit.get("target_sheet"),
-                        "success": edit.get("success", False),
-                        "timestamp": edit.get("timestamp"),
-                        "user_id": session_obj.user_id,
-                        "status": "completed" if edit.get("success", False) else "failed"
-                    })
-        
-        # Sort by timestamp (most recent first)
-        all_prompts.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        customization_requests = all_prompts[:100]  # Limit to 100 most recent
-        print(f"📋 Found {len(customization_requests)} user prompts (requests)")
+        # Get user prompts from customization_requests table
+        print("🔍 Starting customization requests query...")
+        from database_schema import CustomizationRequest
+        requests_query = (
+            session.query(CustomizationRequest)
+            .order_by(CustomizationRequest.created_at.desc())
+            .limit(20)
+        )
+        print("🔍 Customization requests query created, executing...")
+        customization_requests = []
+        for req in requests_query:
+            # Get master form name separately to avoid lazy loading
+            master_form_name = None
+            if req.master_form_id:
+                master = session.query(MasterForm).filter(MasterForm.id == req.master_form_id).first()
+                master_form_name = master.name if master else f"Form {req.master_form_id}"
+            
+            customization_requests.append({
+                "id": req.id,
+                "prompt": req.raw_request,
+                "target_sheet": (req.parsed_requirements or {}).get("target_sheet") if req.parsed_requirements else None,
+                "status": req.status.value if hasattr(req.status, 'value') else req.status,
+                "timestamp": req.created_at.isoformat(),
+                "user_id": req.created_by,
+                "client_name": req.client_name,
+                "form_title": req.form_title,
+                "master_form_id": req.master_form_id,
+                "master_form_name": master_form_name,
+            })
+        print(f"📋 Found {len(customization_requests)} customization requests (user prompts)")
         
         # Get recent operations (audit log)
-        operations_query = session.query(FormOperation).order_by(FormOperation.started_at.desc()).limit(200)
+        print("🔍 Starting operations query...")
+        operations_query = session.query(FormOperation).order_by(FormOperation.started_at.desc()).limit(20)
         recent_operations = []
         print(f"🔧 Found {operations_query.count()} operations")
         for op in operations_query:
             recent_operations.append({
                 "id": op.id,
                 "operation_id": op.operation_id,
-                "operation_type": op.operation_type.value,
+                "operation_type": (op.operation_type.value if hasattr(op.operation_type, 'value') else op.operation_type),
                 "operation_description": op.operation_description,
                 "target_type": op.target_type,
                 "target_id": op.target_id,
@@ -551,13 +592,14 @@ async def get_admin_dashboard(
                 "execution_time_ms": op.execution_time_ms,
                 "started_at": op.started_at.isoformat(),
                 "completed_at": op.completed_at.isoformat() if op.completed_at else None,
-                "username": op.user.username if op.user else None
+                "username": op.user.username if op.user else f"User {op.user_id}"
             })
         
         # Get active sessions
+        print("🔍 Starting active sessions query...")
         sessions_query = session.query(UserSession).filter(
             UserSession.status == SessionStatus.ACTIVE
-        ).order_by(UserSession.last_activity.desc()).limit(100)
+        ).order_by(UserSession.last_activity.desc()).limit(20)
         active_sessions = []
         for sess in sessions_query:
             active_sessions.append({
@@ -569,9 +611,10 @@ async def get_admin_dashboard(
                 "expires_at": sess.expires_at.isoformat(),
                 "last_activity": sess.last_activity.isoformat(),
                 "created_at": sess.created_at.isoformat(),
-                "username": sess.user.username if sess.user else None,
-                "user_role": sess.user.role.value if sess.user else None
+                "username": sess.user.username if sess.user else f"User {sess.user_id}",
+                "user_role": sess.user.role.value if sess.user else "Unknown"
             })
+        print(f"🔍 Found {len(active_sessions)} active sessions")
         
         # Get comprehensive statistics
         from database_schema import get_database_stats
@@ -611,6 +654,193 @@ async def get_admin_dashboard(
         )
 
 # =============== CORE API ENDPOINTS ===============
+
+@app.post("/api/admin/master-forms/import")
+async def import_master_form(
+    payload: MasterFormUpsertRequest,
+    admin_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_database_session)
+):
+    """Admin-only: Create or update a master form record ONLY in master_forms.
+    If a master form with the same name exists, updates its metadata and current_version.
+    """
+    try:
+        from database_schema import MasterForm
+        # Find by name
+        master = db.query(MasterForm).filter(MasterForm.name == payload.name).first()
+        if not master:
+            master = MasterForm(
+                form_id=f"form_{uuid.uuid4().hex[:8]}",
+                name=payload.name,
+                description=payload.description or "",
+                current_version=payload.current_version,
+                form_type=payload.form_type or "General",
+                client_category=payload.client_category,
+                equipment_types=payload.equipment_types or [],
+                tags=payload.tags or [],
+                is_active=payload.is_active if payload.is_active is not None else True,
+                is_template=payload.is_template if payload.is_template is not None else True,
+                access_level=payload.access_level or "public",
+                file_size=payload.file_size,
+                file_checksum=payload.file_checksum,
+            )
+            db.add(master)
+            db.commit()
+            db.refresh(master)
+            get_operation_logger().log_operation(
+                operation_type=OperationType.CREATE,
+                description=f"Master form created: {payload.name}",
+                target_type="master_form",
+                target_id=str(master.id),
+                target_name=payload.name,
+                user_id=admin_user.id,
+                success=True
+            )
+            return {"success": True, "action": "created", "master_form_id": master.id}
+        else:
+            # Update metadata only
+            master.current_version = payload.current_version
+            if payload.description is not None:
+                master.description = payload.description
+            if payload.form_type is not None:
+                master.form_type = payload.form_type
+            if payload.client_category is not None:
+                master.client_category = payload.client_category
+            if payload.equipment_types is not None:
+                master.equipment_types = payload.equipment_types
+            if payload.tags is not None:
+                master.tags = payload.tags
+            if payload.is_active is not None:
+                master.is_active = payload.is_active
+            if payload.is_template is not None:
+                master.is_template = payload.is_template
+            if payload.access_level is not None:
+                master.access_level = payload.access_level
+            if payload.file_size is not None:
+                master.file_size = payload.file_size
+            if payload.file_checksum is not None:
+                master.file_checksum = payload.file_checksum
+            db.commit()
+            get_operation_logger().log_operation(
+                operation_type=OperationType.UPDATE,
+                description=f"Master form updated: {payload.name} -> {payload.current_version}",
+                target_type="master_form",
+                target_name=payload.name,
+                user_id=admin_user.id,
+                success=True
+            )
+            return {"success": True, "action": "updated", "master_form_id": master.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+
+@app.delete("/api/admin/master-forms/{master_form_id}")
+async def delete_master_form(
+    master_form_id: int,
+    admin_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_database_session)
+):
+    """Admin-only: Delete a master form and its versions."""
+    try:
+        from database_schema import MasterForm
+        master = db.query(MasterForm).filter(MasterForm.id == master_form_id).first()
+        if not master:
+            raise HTTPException(status_code=404, detail="Master form not found")
+        name = master.name
+        db.delete(master)
+        db.commit()
+        get_operation_logger().log_operation(
+            operation_type=OperationType.DELETE,
+            description=f"Master form deleted: {name}",
+            target_type="master_form",
+            target_id=str(master_form_id),
+            target_name=name,
+            user_id=admin_user.id,
+            success=True
+        )
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+
+
+@app.get("/api/admin/form-versions/{version_id}/download")
+async def download_form_version(
+    version_id: int,
+    admin_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_database_session)
+):
+    """Admin-only: Download XML content for a specific form version."""
+    try:
+        from database_schema import FormVersion
+        version = db.query(FormVersion).filter(FormVersion.id == version_id).first()
+        if not version:
+            raise HTTPException(status_code=404, detail="Form version not found")
+        
+        if not version.xml_content:
+            raise HTTPException(status_code=404, detail="No XML content available")
+        
+        # Generate filename
+        filename = f"{version.master_form.name}_{version.version}.xml" if version.master_form else f"form_version_{version_id}.xml"
+        
+        # Log download
+        get_operation_logger().log_operation(
+            operation_type=OperationType.READ,
+            description=f"Form version downloaded: {filename}",
+            target_type="form_version",
+            target_id=str(version_id),
+            target_name=filename,
+            user_id=admin_user.id,
+            success=True
+        )
+        
+        # Return XML content as file download
+        from fastapi.responses import Response
+        return Response(
+            content=version.xml_content,
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Form-Name": version.master_form.name if version.master_form else "Unknown",
+                "X-Version": version.version,
+                "X-Created-By": str(version.created_by) if version.created_by else "Unknown"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
+
+@app.post("/api/admin/purge-db")
+async def purge_database(
+    payload: PurgeConfirmRequest,
+    admin_user: User = Depends(get_admin_user)
+):
+    """Admin-only: Drop and recreate all tables. Requires {"confirm": true}."""
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="Confirmation required: set confirm=true")
+    try:
+        from database_manager import initialize_database
+        ok = initialize_database(force_recreate=True)
+        get_operation_logger().log_operation(
+            operation_type=OperationType.DELETE,
+            description="Database purged and recreated",
+            target_type="database",
+            user_id=admin_user.id,
+            success=bool(ok)
+        )
+        if not ok:
+            raise HTTPException(status_code=500, detail="Purge failed")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Purge error: {str(e)}")
 
 @app.put("/api/admin/users/{user_id}/role")
 async def update_user_role(
@@ -843,6 +1073,57 @@ async def ai_edit_endpoint(
         if target_sheet:
             enhanced_prompt = f"Focus on the '{target_sheet}' sheet. {prompt}"
 
+        # Persist prompt to customization_requests table (initial record)
+        customization_request_id = None
+        try:
+            from database_schema import MasterForm, CustomizationRequest, RequestStatus
+            # Derive form context for client_name/form_title
+            form_title = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
+            client_name = current_user.company or current_user.username or "Unknown"
+            master = db.query(MasterForm).filter(MasterForm.name == form_title).first()
+            if not master:
+                # Ensure a MasterForm exists (required by FK)
+                try:
+                    from database_manager import get_form_manager
+                    with open(working_file, "r", encoding="utf-8") as xf:
+                        xml_content_for_master = xf.read()
+                    timestamp_version = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    get_form_manager().create_master_form(
+                        name=form_title,
+                        version=timestamp_version,
+                        xml_content=xml_content_for_master,
+                        description=f"Auto-created from prompt for {form_title}",
+                        form_type="General",
+                        equipment_types=[],
+                        tags=[],
+                        created_by=current_user.id
+                    )
+                    master = db.query(MasterForm).filter(MasterForm.name == form_title).first()
+                except Exception as ce:
+                    print(f"⚠️ Failed to create MasterForm during request logging: {str(ce)}")
+                    db.rollback()
+            master_form_id = master.id if master else None
+
+            # Create minimal customization request row capturing the raw prompt
+            req = CustomizationRequest(
+                request_id=f"req_{uuid.uuid4().hex[:8]}",
+                client_name=str(client_name),
+                form_title=form_title,
+                master_form_id=master_form_id,
+                raw_request=prompt,
+                parsed_requirements={"target_sheet": target_sheet} if target_sheet else None,
+                status=RequestStatus.IN_PROGRESS.value,
+                created_by=current_user.id,
+            )
+            db.add(req)
+            db.commit()
+            db.refresh(req)
+            customization_request_id = req.id
+        except Exception as e:
+            # Non-fatal: proceed even if request logging fails
+            print(f"❌ Failed to create customization request: {str(e)}")
+            db.rollback()
+
         # Process the prompt using the ReAct agent
         print(f"🔍 Processing AI edit prompt: {enhanced_prompt}")
         result = await agent.process_prompt(enhanced_prompt)
@@ -1002,6 +1283,20 @@ async def ai_edit_endpoint(
                     error_message=str(e)
                 )
 
+            # Update customization request as completed
+            try:
+                if customization_request_id:
+                    from database_schema import CustomizationRequest, RequestStatus
+                    req = db.query(CustomizationRequest).get(customization_request_id)
+                    if req:
+                        req.status = RequestStatus.APPROVED.value if success else RequestStatus.REVISION_REQUESTED.value
+                        req.processing_completed_at = datetime.utcnow()
+                        db.add(req)
+                        db.commit()
+            except Exception as e:
+                print(f"⚠️ Failed to update customization request status: {str(e)}")
+                db.rollback()
+
             # Log AI edit operation
             operation_logger = get_operation_logger()
             operation_logger.log_operation(
@@ -1015,7 +1310,8 @@ async def ai_edit_endpoint(
                 after_data={
                     "tool_calls_made": tool_calls_made,
                     "modified_file": user_form_session.modified_file_path,
-                    "changes_applied": modified_file_created
+                    "changes_applied": modified_file_created,
+                    "customization_request_id": customization_request_id
                 }
             )
 
@@ -1032,6 +1328,20 @@ async def ai_edit_endpoint(
             }
         else:
             # Log failed AI edit
+            # Update customization request as failed
+            try:
+                if customization_request_id:
+                    from database_schema import CustomizationRequest, RequestStatus
+                    req = db.query(CustomizationRequest).get(customization_request_id)
+                    if req:
+                        req.status = RequestStatus.REVISION_REQUESTED.value
+                        req.processing_completed_at = datetime.utcnow()
+                        db.add(req)
+                        db.commit()
+            except Exception as e2:
+                print(f"⚠️ Failed to update customization request (failure path): {str(e2)}")
+                db.rollback()
+
             operation_logger = get_operation_logger()
             operation_logger.log_operation(
                 operation_type=OperationType.UPDATE,
@@ -1040,12 +1350,27 @@ async def ai_edit_endpoint(
                 target_name=current_uploaded_file,
                 user_id=current_user.id,
                 success=False,
-                error_message=result["error"]
+                error_message=result["error"],
+                after_data={"customization_request_id": customization_request_id}
             )
             return {"success": False, "error": result["error"], "prompt": prompt, "target_sheet": target_sheet}
 
     except Exception as e:
         # Log exception
+        # Update customization request as failed (exception path)
+        try:
+            if 'customization_request_id' in locals() and customization_request_id:
+                from database_schema import CustomizationRequest, RequestStatus
+                req = db.query(CustomizationRequest).get(customization_request_id)
+                if req:
+                    req.status = RequestStatus.REVISION_REQUESTED.value
+                    req.processing_completed_at = datetime.utcnow()
+                    db.add(req)
+                    db.commit()
+        except Exception as e2:
+            print(f"⚠️ Failed to update customization request (exception path): {str(e2)}")
+            db.rollback()
+
         operation_logger = get_operation_logger()
         operation_logger.log_operation(
             operation_type=OperationType.UPDATE,
@@ -1054,7 +1379,8 @@ async def ai_edit_endpoint(
             target_name=current_uploaded_file,
             user_id=current_user.id,
             success=False,
-            error_message=str(e)
+            error_message=str(e),
+            after_data={"customization_request_id": customization_request_id}
         )
         raise HTTPException(status_code=500, detail=f"AI editing error: {str(e)}")
 

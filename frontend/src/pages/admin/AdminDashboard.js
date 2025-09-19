@@ -269,9 +269,7 @@ const AdminDashboard = () => {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Version
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Usage
-                    </th>
+                    
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -286,9 +284,7 @@ const AdminDashboard = () => {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         Current: {form.current_version}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {form.usage_count}
-                      </td>
+                      
                     </tr>
                   ))}
                 </tbody>
@@ -311,6 +307,7 @@ const AdminDashboard = () => {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Version</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -326,6 +323,19 @@ const AdminDashboard = () => {
                         )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(v.created_at).toLocaleString()}</td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {v.has_xml_content ? (
+                          <a
+                            href={`/api/admin/form-versions/${v.id}/download`}
+                            className="btn-secondary text-xs"
+                            download
+                          >
+                            Download XML
+                          </a>
+                        ) : (
+                          <span className="text-xs text-gray-400">No XML</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -373,9 +383,22 @@ const AdminDashboard = () => {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`badge ${request.status === 'completed' ? 'badge-success' : 'badge-error'}`}>
-                        {request.status}
-                        </span>
+                        {(() => {
+                          const st = (request.status || '').toLowerCase();
+                          const successStates = ['approved', 'deployed', 'completed'];
+                          const warningStates = ['pending', 'in_progress', 'ready_for_review', 'under_review'];
+                          const dangerStates = ['revision_requested', 'cancelled', 'failed'];
+                          const klass = successStates.includes(st)
+                            ? 'badge-green'
+                            : warningStates.includes(st)
+                              ? 'badge-yellow'
+                              : dangerStates.includes(st)
+                                ? 'badge-red'
+                                : 'badge';
+                          return (
+                            <span className={`badge ${klass}`}>{request.status}</span>
+                          );
+                        })()}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm text-gray-500">
