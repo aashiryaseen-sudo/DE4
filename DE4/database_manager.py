@@ -509,7 +509,7 @@ class OperationLogger:
                 
                 operation = FormOperation(
                     operation_id=operation_id,
-                    operation_type=operation_type,
+                    operation_type=operation_type.value,
                     operation_description=description,
                     target_type=target_type,
                     target_id=target_id,

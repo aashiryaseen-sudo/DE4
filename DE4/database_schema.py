@@ -207,7 +207,7 @@ class FormVersion(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     master_form_id = Column(Integer, ForeignKey('master_forms.id'), nullable=False)
-    version = Column(String(20), nullable=False)
+    version = Column(String(255), nullable=False)
     
     # Version details
     version_notes = Column(Text, nullable=True)

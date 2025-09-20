@@ -114,35 +114,6 @@ class XLSFormTaskManager:
                     )
                     continue
 
-            if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "setting" in s.lower():
-                prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+setting", s)
-                if not prop_name:
-                    prop_name = self._extract(r"change\s+(form_title|form_id|version)\s+to", s)
-
-                new_value = self._extract(r"to\s+(.+)$", s)
-                if new_value:
-                    new_value = new_value.strip(" '\"")
-
-                if prop_name and new_value is not None:
-                    title = f"Modify setting '{prop_name}'"
-                    params = {
-                        "worksheet_name": "settings",
-                        "key_field_name": "form_id",
-                        "key_field_value": "__DUMMY_SETTINGS_VALUE__",
-                        "property_to_change": prop_name,
-                        "new_value": new_value,
-                    }
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="modify_field_property",
-                            worksheet="settings",
-                            parameters=params,
-                        )
-                    )
-                    continue
-
             if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "field" in s.lower():
                 prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+property", s)
                 field_name = self._extract(r"field\s+['\"]([\w:]+)['\"]", s)
@@ -150,13 +121,7 @@ class XLSFormTaskManager:
 
                 if prop_name and field_name and new_value is not None:
                     title = f"Modify property '{prop_name}' for field '{field_name}'"
-                    params = {
-                        "worksheet_name": "survey",
-                        "key_field_name": "name",  # In the 'survey' sheet, the key field is 'name'
-                        "key_field_value": field_name,  # The value for the 'name' key is the field_name
-                        "property_to_change": prop_name,
-                        "new_value": new_value,
-                    }
+                    params = {"field_name": field_name, "property_name": prop_name, "new_value": new_value}
                     tasks.append(
                         DynTask(
                             id=self._tid(len(tasks)),
@@ -212,28 +177,28 @@ class XLSFormTaskManager:
                 if items_str:
                     items = [item.strip() for item in items_str.strip(" '\"").split(",") if item.strip()]
 
-                if len(items) > 1:
-                    title = f"Add {len(items)} choices to list {list_name}"
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="add_choice_batch",
-                            worksheet="auto_detect",
-                            parameters={"list_name": list_name, "items": items},
+                    if len(items) > 1:
+                        title = f"Add {len(items)} choices to list {list_name}"
+                        tasks.append(
+                            DynTask(
+                                id=self._tid(len(tasks)),
+                                title=title,
+                                action="add_choice_batch",
+                                worksheet="auto_detect",
+                                parameters={"list_name": list_name, "items": items},
+                            )
                         )
-                    )
-                elif items:
-                    title = f"Add choice '{items[0]}' to list {list_name}"
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="add_choice_single",
-                            worksheet="auto_detect",
-                            parameters={"list_name": list_name, "label": items[0], "name": items[0]},
+                    elif items:
+                        title = f"Add choice '{items[0]}' to list {list_name}"
+                        tasks.append(
+                            DynTask(
+                                id=self._tid(len(tasks)),
+                                title=title,
+                                action="add_choice_single",
+                                worksheet="auto_detect",
+                                parameters={"list_name": list_name, "label": items[0], "name": items[0]},
+                            )
                         )
-                    )
                     continue
 
         if not tasks:
@@ -311,10 +276,10 @@ class XLSFormTaskManager:
                 failed.append(task)
 
             task.completed_at = datetime.now().isoformat()
-            results.append({"task_id": task.id, "title": task.title, "status": task.status, "result": task.result, "error": task.error_message})
+            results.append({"task_id": task.id, "title": task.title, "status": task.status, "result": task.result})
 
         final_output_path = None
-        if editor.modified:
+        if editor.modified and not failed:
             final_output_path = editor.save_modified_xml()
             session.modified_files.append(final_output_path)
         elif failed:
@@ -365,7 +330,28 @@ class XLSFormTaskManager:
         result = {"success": ok}
 
         return result
-    
+
+    def _handle_analyze_structure(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
+        from xml_parser import XLSFormParser
+
+        parser = XLSFormParser(self.xml_file_path)
+        analysis = parser.analyze_complete_form()
+        return {"success": True, "analysis": analysis, "worksheets": list(analysis.keys())}
+
+    def _handle_delete_field(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
+        field_name = params.get("field_name")
+        if not field_name:
+            return {"success": False, "error": "field_name parameter is missing"}
+
+        success = editor.remove_field_by_name(field_name)
+        result = {"success": success}
+        if success:
+            result["message"] = f"Field '{field_name}' and its choices were successfully deleted."
+        elif not success:
+            result["message"] = f"Could not delete field '{field_name}'. It may not exist."
+
+        return result
+
     def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         worksheet_name = params.get("worksheet_name")
         key_field_name = params.get("key_field_name")
@@ -392,46 +378,6 @@ class XLSFormTaskManager:
             result["message"] = f"Could not modify property for field '{key_field_name}' for sheet {worksheet_name}."
 
         return result
-
-    def _handle_analyze_structure(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        from xml_parser import XLSFormParser
-
-        parser = XLSFormParser(self.xml_file_path)
-        analysis = parser.analyze_complete_form()
-        return {"success": True, "analysis": analysis, "worksheets": list(analysis.keys())}
-
-    def _handle_delete_field(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        field_name = params.get("field_name")
-        if not field_name:
-            return {"success": False, "error": "field_name parameter is missing"}
-
-        success = editor.remove_field_by_name(field_name)
-        result = {"success": success}
-        if success:
-            result["message"] = f"Field '{field_name}' and its choices were successfully deleted."
-        elif not success:
-            result["message"] = f"Could not delete field '{field_name}'. It may not exist."
-
-        return result
-
-    def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-            list_name = params.get("list_name")
-            choice_name = params.get("choice_name")
-            prop_name = params.get("property_to_change")
-            new_value = params.get("new_value")
-
-            if not all([list_name, choice_name, prop_name, new_value is not None]):
-                return {"success": False, "error": "Missing one of required parameters for modify_choice"}
-
-            success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
-            result = {"success": success}
-
-            if success and editor.modified:
-                result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
-            elif not success:
-                result["message"] = f"Could not modify choice '{choice_name}'."
-
-            return result
 
     def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         list_name = params.get("list_name")

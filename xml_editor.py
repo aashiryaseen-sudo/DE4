@@ -17,9 +17,8 @@ class XLSFormXMLEditor:
     Production-ready XML editor that applies actual changes to XLSForm XML files
     """
 
-    def __init__(self, xml_file_path: str, base_original_path: str = None):
-        self.working_xml_path = xml_file_path
-        self.original_xml_path = base_original_path or xml_file_path
+    def __init__(self, xml_file_path: str):
+        self.original_xml_path = xml_file_path
         self.tree = ET.parse(xml_file_path)
         self.root = self.tree.getroot()
         self.namespaces = {
@@ -320,6 +319,97 @@ class XLSFormXMLEditor:
             print(f"Error adding choice option: {str(e)}")
             return False
 
+    def modify_choice_property(self, list_name: str, choice_name: str, property_to_change: str, new_value: str) -> bool:
+        """
+        Finds a specific choice and modifies one of its properties (e.g., its 'label').
+
+        """
+        worksheets_to_check = ["select_one", "select_multiple"]
+        found_and_modified = False
+
+        try:
+            for sheet_name in worksheets_to_check:
+                worksheet = self.find_worksheet(sheet_name)
+                if worksheet is None:
+                    continue
+
+                table = self.find_table_in_worksheet(worksheet)
+                if table is None:
+                    continue
+
+                headers = self.get_headers(table)
+                try:
+                    list_name_col_index = headers.index("list name")
+                    name_col_index = headers.index("name")
+                    prop_col_index = headers.index(property_to_change)
+                except ValueError:
+                    continue
+
+                target_row = None
+                all_rows = table.findall(".//ss:Row", self.namespaces)
+
+                for row in all_rows[1:]:
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+
+                    # Simplified check assuming cells are in order.
+                    if len(cells) > list_name_col_index and len(cells) > name_col_index:
+                        list_name_data = cells[list_name_col_index].find(".//ss:Data", self.namespaces)
+                        name_data = cells[name_col_index].find(".//ss:Data", self.namespaces)
+
+                        if (
+                            list_name_data is not None
+                            and list_name_data.text == list_name
+                            and name_data is not None
+                            and name_data.text == choice_name
+                        ):
+                            target_row = row
+                            break
+
+                if target_row:
+                    target_cell = None
+                    current_idx = 0
+                    cells_in_row = target_row.findall(".//ss:Cell", self.namespaces)
+
+                    for i, cell in enumerate(cells_in_row):
+                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                        if index_attr:
+                            current_idx = int(index_attr) - 1
+
+                        if current_idx == prop_col_index:
+                            target_cell = cell
+                            break
+
+                        if current_idx > prop_col_index:
+                            target_cell = ET.Element(f"{{{self.namespaces['ss']}}}Cell")
+                            target_cell.set(f"{{{self.namespaces['ss']}}}Index", str(prop_col_index + 1))
+                            target_row.insert(i, target_cell)
+                            break
+
+                        current_idx += 1
+
+                    if target_cell is None:
+                        target_cell = ET.SubElement(target_row, f"{{{self.namespaces['ss']}}}Cell")
+
+                    data_elem = target_cell.find(f".//ss:Data", self.namespaces)
+                    if data_elem is None:
+                        data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
+                        data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
+
+                    data_elem.text = str(new_value)
+                    self.modified = True
+                    found_and_modified = True
+                    print(f"Successfully modified choice '{choice_name}' in list '{list_name}'.")
+                    break
+
+            if not found_and_modified:
+                print(f"WARN: Could not find choice '{choice_name}' in list '{list_name}'.")
+
+            return found_and_modified
+
+        except Exception as e:
+            print(f"ERROR in modify_choice_property: {str(e)}")
+            return False
+
     def add_choice_options_batch(
         self, list_name: str, items: List[Dict[str, str]], worksheet_name: str = None
     ) -> Dict[str, Any]:
@@ -350,126 +440,6 @@ class XLSFormXMLEditor:
             else:
                 failures.append({"label": lab, "name": nm, "reason": "insert failed"})
         return {"added": added, "failed": failures, "modified": self.modified}
-
-    def modify_choice_property(self, list_name: str, choice_name: str, property_name: str, new_value: str) -> bool:
-        """
-        Modify a property (commonly 'label' or 'name') of a choice row where list_name == list_name and name == choice_name.
-
-        - Searches worksheets detected by detect_choice_worksheets()
-        - Supports common header variants: ['label','name','list name','order'] or ['list_name','name','label']
-        - Returns True if at least one matching row is updated
-        """
-        try:
-            updated = 0
-
-            # Gather candidate worksheets that look like choices
-            candidates = self.detect_choice_worksheets()
-            for ws_name in candidates:
-                worksheet = self.find_worksheet(ws_name)
-                if worksheet is None:
-                    continue
-                table = self.find_table_in_worksheet(worksheet)
-                if table is None:
-                    continue
-
-                headers = [h.lower().strip() for h in self.get_headers(table)]
-                if not headers:
-                    continue
-
-                # Helper to map header aliases
-                def idx_of(*aliases: str) -> int:
-                    for a in aliases:
-                        if a in headers:
-                            return headers.index(a)
-                    return -1
-
-                list_idx = idx_of("list name", "list_name")
-                name_idx = idx_of("name")
-                label_idx = idx_of("label")
-                order_idx = idx_of("order")
-
-                if list_idx == -1 or name_idx == -1:
-                    continue
-
-                rows = table.findall(".//ss:Row", self.namespaces)
-                for row in rows[1:]:  # skip header row
-                    cells = row.findall(".//ss:Cell", self.namespaces)
-                    # Build sparse mapping index->text honoring ss:Index
-                    expanded: Dict[int, str] = {}
-                    current_idx = 0
-                    for cell in cells:
-                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
-                        if index_attr:
-                            current_idx = int(index_attr) - 1
-                        data_elem = cell.find(".//ss:Data", self.namespaces)
-                        expanded[current_idx] = data_elem.text if data_elem is not None else ""
-                        current_idx += 1
-
-                    row_list = (expanded.get(list_idx, "") or "").strip()
-                    row_name = (expanded.get(name_idx, "") or "").strip()
-                    if row_list == str(list_name).strip() and row_name == str(choice_name).strip():
-                        # Determine target column
-                        target_col = None
-                        prop = property_name.lower().strip()
-                        if prop == "label" and label_idx != -1:
-                            target_col = label_idx
-                        elif prop == "name":
-                            target_col = name_idx
-                        elif prop == "order" and order_idx != -1:
-                            target_col = order_idx
-                        else:
-                            # Unsupported property for this row structure
-                            continue
-
-                        # Locate or create the target cell honoring ss:Index
-                        target_cell = None
-                        current_idx = 0
-                        for cell in cells:
-                            index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
-                            if index_attr:
-                                current_idx = int(index_attr) - 1
-                            if current_idx == target_col:
-                                target_cell = cell
-                                break
-                            if current_idx > target_col:
-                                break
-                            current_idx += 1
-
-                        if target_cell is None:
-                            # Insert a new cell with ss:Index at the correct position
-                            target_cell = ET.Element(f"{{{self.namespaces['ss']}}}Cell")
-                            target_cell.set(f"{{{self.namespaces['ss']}}}Index", str(target_col + 1))
-
-                            # Insert preserving order
-                            inserted = False
-                            for idx, cell in enumerate(cells):
-                                idx_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
-                                if idx_attr and int(idx_attr) - 1 > target_col:
-                                    row.insert(idx, target_cell)
-                                    inserted = True
-                                    break
-                            if not inserted:
-                                row.append(target_cell)
-
-                        data_elem = target_cell.find(f".//ss:Data", self.namespaces)
-                        if data_elem is None:
-                            data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
-                            data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
-                        data_elem.text = str(new_value)
-                        updated += 1
-
-            if updated > 0:
-                self.modified = True
-                print(
-                    f" Updated {updated} choice row(s) for list '{list_name}', choice '{choice_name}' – set {property_name} -> {new_value}."
-                )
-                return True
-            else:
-                print(f" WARN: No matching choice found for list '{list_name}', choice '{choice_name}'.")
-                return False
-        except Exception as e:
-            print(f" ERROR in modify_choice_property: {str(e)}")
-            return False
 
     def modify_cell(self, worksheet_name: str, row_index: int, column_index: int, new_value: str) -> bool:
         """Modify a specific cell value"""
@@ -598,21 +568,12 @@ class XLSFormXMLEditor:
             data_rows = all_rows[1:]
             for row in data_rows:
                 cells = row.findall(".//ss:Cell", self.namespaces)
-                current_idx = 0
-                found_cell = False
-                for cell in cells:
-                    index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
-                    if index_attr:
-                        current_idx = int(index_attr) - 1
-                    if current_idx == name_column_index:
-                        data_elem = cell.find(".//ss:Data", self.namespaces)
-                        if data_elem is not None and data_elem.text == field_name:
-                            row_to_delete = row
-                            found_cell = True
+                if len(cells) > name_column_index:
+                    cell = cells[name_column_index]
+                    data_elem = cell.find(".//ss:Data", self.namespaces)
+                    if data_elem is not None and data_elem.text == field_name:
+                        row_to_delete = row
                         break
-                    current_idx += 1
-                if found_cell:
-                    break
 
             if row_to_delete is not None:
                 print(f"Scanning all cells for dependencies of field '{field_name}'...")
@@ -660,76 +621,48 @@ class XLSFormXMLEditor:
             print(f"ERROR in remove_field_by_name: {str(e)}")
             return False
 
-    def modify_field_property(
-        self, worksheet_name: str, key_field_name: str, key_field_value: str, property_to_change: str, new_value: str
-    ) -> bool:
+    def modify_field_property(self, field_name: str, property_name: str, new_value: str) -> bool:
         """
-        Finds a field in a sheet by its key and modifies one of its properties.
-        Handles 'settings' sheet as a special case.
-        Handles sparse XML rows correctly.
+        Finds a field in the survey sheet by its name and modifies one of its properties.
         """
         try:
-            worksheet = self.find_worksheet(worksheet_name)
+            worksheet = self.find_worksheet("survey")
             if worksheet is None:
-                print(f"ERROR: {worksheet_name} worksheet not found.")
+                print("ERROR: 'survey' worksheet not found.")
                 return False
 
             table = self.find_table_in_worksheet(worksheet)
             if table is None:
-                print(f"ERROR: Table not found in {worksheet_name} worksheet.")
+                print("ERROR: Table not found in 'survey' worksheet.")
                 return False
 
             headers = self.get_headers(table)
             try:
-                key_col_index = headers.index(key_field_name)
-                prop_col_index = headers.index(property_to_change)
+                name_col_index = headers.index("name")
+                prop_col_index = headers.index(property_name)
             except ValueError:
-                print(
-                    f"ERROR: Column '{key_field_name}' or '{property_to_change}' not found in {worksheet_name} headers."
-                )
+                print(f"ERROR: Column 'name' or '{property_name}' not found in survey headers.")
                 return False
 
             target_row = None
             rows = table.findall(".//ss:Row", self.namespaces)
-            data_rows = rows[1:]  # Skip header
 
-            # SPECIAL CASE FOR SETTINGS
-            if worksheet_name == "settings":
-                if len(data_rows) > 0:
-                    target_row = data_rows[0]  # Get the first data row (index 1 of all_rows)
-                else:
-                    print(f" WARN: Row not found in '{worksheet_name}'.")
-                    return False
-
-            # LOGIC FOR ALL OTHER SHEETS (like 'survey')
-            else:
-                for row in data_rows:
-                    cells = row.findall(".//ss:Cell", self.namespaces)
-                    current_idx = 0
-                    found_cell = False
-                    for cell in cells:
-                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
-                        if index_attr:
-                            current_idx = int(index_attr) - 1
-
-                        if current_idx == key_col_index:
-                            data_elem = cell.find(".//ss:Data", self.namespaces)
-                            if data_elem is not None and data_elem.text == key_field_value:
-                                target_row = row
-                                found_cell = True
-                            break  # Stop inner loop
-
-                        current_idx += 1
-
-                    if found_cell:
-                        break  # Stop outer loop
+            # Find the target row based on field_name
+            for row in rows[1:]:
+                cells = row.findall(".//ss:Cell", self.namespaces)
+                if len(cells) > name_col_index:
+                    cell = cells[name_col_index]
+                    data_elem = cell.find(".//ss:Data", self.namespaces)
+                    if data_elem is not None and data_elem.text == field_name:
+                        target_row = row
+                        break
 
             if target_row is None:
-                print(f" WARN: Row with {key_field_name} = '{key_field_value}' not found in '{worksheet_name}'.")
+                print(f" WARN: Field '{field_name}' not found in survey.")
                 return False
 
-            # --- This point onwards is the same as your file ---
             # Find and update the specific cell for the property
+            # This logic handles sparse XML where cells might not exist in order
             target_cell = None
             current_idx = 0
             cells_in_row = target_row.findall(".//ss:Cell", self.namespaces)
@@ -743,7 +676,9 @@ class XLSFormXMLEditor:
                     target_cell = cell
                     break
 
+                # If we've passed the target index, the cell doesn't exist yet
                 if current_idx > prop_col_index:
+                    # Create and insert the cell at the correct position
                     target_cell = ET.Element(f"{{{self.namespaces['ss']}}}Cell")
                     target_cell.set(f"{{{self.namespaces['ss']}}}Index", str(prop_col_index + 1))
                     target_row.insert(i, target_cell)
@@ -752,16 +687,12 @@ class XLSFormXMLEditor:
                 current_idx += 1
 
             if target_cell is None:
-                # This handles if the cell should be at the end, or if the row was empty
                 target_cell = ET.SubElement(target_row, f"{{{self.namespaces['ss']}}}Cell")
-                # If it's not the last cell, set its index
-                if prop_col_index > current_idx:
-                    target_cell.set(f"{{{self.namespaces['ss']}}}Index", str(prop_col_index + 1))
 
             data_elem = target_cell.find(f".//ss:Data", self.namespaces)
             if data_elem is None:
                 data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
-
+                data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
             if str(new_value).upper() == "TRUE":
                 data_elem.set(f"{{{self.namespaces['ss']}}}Type", "Boolean")
                 data_elem.text = "1"
@@ -773,11 +704,11 @@ class XLSFormXMLEditor:
                 data_elem.text = str(new_value)
 
             self.modified = True
-            print(f" Successfully modified '{property_to_change}' in worksheet '{worksheet_name}'.")
+            print(f" Successfully modified property '{property_name}' for field '{field_name}'.")
             return True
 
         except Exception as e:
-            print(f"❌ ERROR in modify_field_property: {str(e)}")
+            print(f" ERROR in modify_field_property: {str(e)}")
             return False
 
     def clone_and_filter_by_equipment(self, new_form_name: str, equipment_to_keep: List[str]) -> Optional[str]:
@@ -919,11 +850,7 @@ class XLSFormXMLEditor:
             self.modified = True
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # Get the original file's directory (just like save_modified_xml)
-            original_dir = os.path.dirname(os.path.abspath(self.original_xml_path))
-            new_filename = f"modified_{new_form_name.replace(' ', '_')}_{timestamp}.xml"
-            output_path = os.path.join(original_dir, new_filename)
+            output_path = f"modified_{new_form_name.replace(' ', '_')}_{timestamp}.xml"
 
             self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
             print(f"✅ Fully Filtered clone (including choices) saved to: {output_path}")
@@ -1061,12 +988,11 @@ class XLSFormXMLEditor:
         try:
             from datetime import datetime
 
-            # Generate timestamped filename in the SAME directory as the original by default
+            # Generate timestamped filename in main directory if no path provided
             if output_path is None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 original_name = os.path.basename(self.original_xml_path).replace(".xml", "")
-                original_dir = os.path.dirname(os.path.abspath(self.original_xml_path))
-                output_path = os.path.join(original_dir, f"modified_{original_name}_{timestamp}.xml")
+                output_path = f"modified_{original_name}_{timestamp}.xml"
 
             # Create backup of original if this is the first save
             backup_path = f"{self.original_xml_path}.backup"
@@ -1078,7 +1004,7 @@ class XLSFormXMLEditor:
             self.tree.write(output_path, encoding="utf-8", xml_declaration=True, method="xml")
 
             print(f"✅ Modified XML saved to: {os.path.abspath(output_path)}")
-            return os.path.abspath(output_path)
+            return output_path
 
         except Exception as e:
             print(f"❌ Error saving XML: {str(e)}")
@@ -1097,6 +1023,6 @@ class XLSFormXMLEditor:
 
 
 # Factory function
-def create_xml_editor(xml_file_path: str, base_original_path: str = None) -> XLSFormXMLEditor:
+def create_xml_editor(xml_file_path: str) -> XLSFormXMLEditor:
     """Create an XML editor instance"""
-    return XLSFormXMLEditor(xml_file_path, base_original_path=base_original_path)
+    return XLSFormXMLEditor(xml_file_path)

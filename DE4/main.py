@@ -1,23 +1,29 @@
 import json
 import os
 import tempfile
+import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Depends, status
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, validator
-from typing import Union
-
-from langgraph_proper_agent import create_proper_xlsform_agent
-from database import (
-    get_database_session, get_current_user, get_current_active_user, 
-    get_admin_user, require_editor_user, initialize_database, db_manager
-)
-from database_manager import get_user_manager, get_form_manager, get_operation_logger
-from database_schema import User, UserRole, SessionStatus, RequestStatus, OperationType
 from sqlalchemy.orm import Session
+
+from database import (
+    db_manager,
+    get_admin_user,
+    get_current_active_user,
+    get_current_user,
+    get_database_session,
+    initialize_database,
+    require_editor_user,
+)
+from database_manager import get_form_manager, get_operation_logger, get_user_manager
+from database_schema import OperationType, RequestStatus, SessionStatus, User, UserRole
+from langgraph_proper_agent import create_proper_xlsform_agent
 from models import (
     Choice,
     ChoiceCreate,
@@ -36,8 +42,6 @@ from models import (
     XLSFormStats,
 )
 from xml_parser import create_xml_editor
-import uuid
-from pathlib import Path
 
 app = FastAPI(
     title="DE4 Forms Platform API",
@@ -54,6 +58,7 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
+
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
@@ -61,17 +66,18 @@ async def startup_event():
     # Print DB debug summary and connection status at startup
     try:
         from database import db_manager as dm
+
         summary = dm.debug_summary()
         print("DB Config:", summary)
         conn_test = dm.test_connection()
-        print("DB Connection Test:", {k: v for k, v in conn_test.items() if k != 'database_url'})
+        print("DB Connection Test:", {k: v for k, v in conn_test.items() if k != "database_url"})
     except Exception as e:
         print("DB debug failed:", str(e))
 
     success = initialize_database()
     if not success:
         print("Warning: Database initialization failed")
-    
+
     # Cleanup expired sessions
     try:
         cleaned = db_manager.cleanup_expired_sessions()
@@ -79,7 +85,9 @@ async def startup_event():
     except Exception as e:
         print(f"Session cleanup error: {e}")
 
+
 # =============== PYDANTIC MODELS ===============
+
 
 class UserCreate(BaseModel):
     username: str
@@ -89,20 +97,21 @@ class UserCreate(BaseModel):
     company: str = ""
     department: str = ""
     phone: str = ""
-    
-    @validator('username')
+
+    @validator("username")
     def validate_username(cls, v):
         if len(v) < 3:
-            raise ValueError('Username must be at least 3 characters long')
-        if not v.replace('_', '').replace('-', '').isalnum():
-            raise ValueError('Username can only contain letters, numbers, hyphens, and underscores')
+            raise ValueError("Username must be at least 3 characters long")
+        if not v.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("Username can only contain letters, numbers, hyphens, and underscores")
         return v
-    
-    @validator('password')
+
+    @validator("password")
     def validate_password(cls, v):
         if len(v) < 6:
-            raise ValueError('Password must be at least 6 characters long')
+            raise ValueError("Password must be at least 6 characters long")
         return v
+
 
 class UserResponse(BaseModel):
     id: int
@@ -115,13 +124,15 @@ class UserResponse(BaseModel):
     is_active: bool
     is_verified: bool
     created_at: datetime
-    
+
     class Config:
         from_attributes = True
+
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
 
 class LoginResponse(BaseModel):
     success: bool
@@ -130,6 +141,7 @@ class LoginResponse(BaseModel):
     session_token: str
     expires_at: datetime
 
+
 class HealthResponse(BaseModel):
     status: str
     database_status: str
@@ -137,21 +149,23 @@ class HealthResponse(BaseModel):
     stats: Dict[str, int]
     message: str
 
+
 class AdminDashboardResponse(BaseModel):
     # Form data
     master_forms: List[Dict[str, Any]]
     form_versions: List[Dict[str, Any]]
-    
-    # Request data  
+
+    # Request data
     customization_requests: List[Dict[str, Any]]
-    
+
     # Operations and sessions
     recent_operations: List[Dict[str, Any]]
     active_sessions: List[Dict[str, Any]]
-    
+
     # Statistics
     stats: Dict[str, int]
     timestamp: datetime
+
 
 class UpdateUserRoleRequest(BaseModel):
     role: str
@@ -183,14 +197,12 @@ edit_history: List[Dict[str, Any]] = []
 
 # =============== USER MANAGEMENT ENDPOINTS ===============
 
+
 @app.post("/api/users/register", response_model=UserResponse)
-async def create_user(
-    user_data: UserCreate,
-    db: Session = Depends(get_database_session)
-):
+async def create_user(user_data: UserCreate, db: Session = Depends(get_database_session)):
     """
     Create a new user account
-    
+
     - **username**: Unique username (3+ chars, alphanumeric with - and _)
     - **email**: Valid email address
     - **password**: Password (6+ characters)
@@ -202,7 +214,7 @@ async def create_user(
     try:
         user_manager = get_user_manager()
         operation_logger = get_operation_logger()
-        
+
         # Create user with EDITOR role by default
         new_user = user_manager.create_user(
             username=user_data.username,
@@ -214,26 +226,26 @@ async def create_user(
             department=user_data.department,
             phone=user_data.phone,
             is_active=True,
-            is_verified=False  # Require email verification in production
+            is_verified=False,  # Require email verification in production
         )
-        
+
         if not new_user:
             # Distinguish duplicate from other DB errors to avoid misleading 400s
             from database_schema import User as DBUser
-            duplicate = db.query(DBUser).filter(
-                (DBUser.username == user_data.username) | (DBUser.email == user_data.email)
-            ).first()
+
+            duplicate = (
+                db.query(DBUser)
+                .filter((DBUser.username == user_data.username) | (DBUser.email == user_data.email))
+                .first()
+            )
             if duplicate:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Username or email already exists"
-                )
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username or email already exists")
             else:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="User creation failed due to an internal error"
+                    detail="User creation failed due to an internal error",
                 )
-        
+
         # Log user creation operation
         operation_logger.log_operation(
             operation_type=OperationType.CREATE,
@@ -242,53 +254,45 @@ async def create_user(
             target_id=str(new_user.id),
             target_name=new_user.username,
             user_id=new_user.id,
-            success=True
+            success=True,
         )
-        
+
         return UserResponse(
             id=new_user.id,
             username=new_user.username,
             email=new_user.email,
             full_name=new_user.full_name,
-            role=(new_user.role.value if hasattr(new_user.role, 'value') else new_user.role),
+            role=(new_user.role.value if hasattr(new_user.role, "value") else new_user.role),
             company=new_user.company or "",
             department=new_user.department or "",
             is_active=new_user.is_active,
             is_verified=new_user.is_verified,
-            created_at=new_user.created_at
+            created_at=new_user.created_at,
         )
-        
+
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except HTTPException:
         # Propagate HTTPExceptions (e.g., 400 duplicate user) without wrapping as 500
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"User creation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"User creation failed: {str(e)}")
+
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login_user(
-    login_data: LoginRequest,
-    db: Session = Depends(get_database_session)
-):
+async def login_user(login_data: LoginRequest, db: Session = Depends(get_database_session)):
     """
     Authenticate user and create session
-    
+
     Returns session token for authenticated requests
     """
     try:
         user_manager = get_user_manager()
         operation_logger = get_operation_logger()
-        
+
         # Authenticate user
         user = user_manager.authenticate_user(login_data.username, login_data.password)
-        
+
         if not user:
             # Log failed login attempt
             operation_logger.log_operation(
@@ -296,26 +300,17 @@ async def login_user(
                 description=f"Failed login attempt for username: {login_data.username}",
                 target_type="user",
                 target_name=login_data.username,
-                success=False
+                success=False,
             )
-            
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password"
-            )
-        
+
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
         # Create session
-        session = user_manager.create_session(
-            user_id=user.id,
-            expires_hours=24
-        )
-        
+        session = user_manager.create_session(user_id=user.id, expires_hours=24)
+
         if not session:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create session"
-            )
-        
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create session")
+
         # Log successful login
         operation_logger.log_operation(
             operation_type=OperationType.READ,
@@ -324,9 +319,9 @@ async def login_user(
             target_id=str(user.id),
             target_name=user.username,
             user_id=user.id,
-            success=True
+            success=True,
         )
-        
+
         return LoginResponse(
             success=True,
             message="Login successful",
@@ -335,24 +330,22 @@ async def login_user(
                 username=user.username,
                 email=user.email,
                 full_name=user.full_name,
-                role=(user.role.value if hasattr(user.role, 'value') else user.role),
+                role=(user.role.value if hasattr(user.role, "value") else user.role),
                 company=user.company or "",
                 department=user.department or "",
                 is_active=user.is_active,
                 is_verified=user.is_verified,
-                created_at=user.created_at
+                created_at=user.created_at,
             ),
             session_token=session.session_token,
-            expires_at=session.expires_at
+            expires_at=session.expires_at,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Login failed: {str(e)}"
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Login failed: {str(e)}")
+
 
 @app.post("/api/auth/logout")
 async def logout_user(
@@ -365,6 +358,7 @@ async def logout_user(
     """
     try:
         from database_schema import UserSession
+
         terminated = False
         token_value: Optional[str] = None
         if authorization:
@@ -377,10 +371,11 @@ async def logout_user(
         if token_value:
             try:
                 with db_manager.get_session() as session:
-                    user_session = session.query(UserSession).filter(
-                        UserSession.session_token == token_value,
-                        UserSession.status == SessionStatus.ACTIVE
-                    ).first()
+                    user_session = (
+                        session.query(UserSession)
+                        .filter(UserSession.session_token == token_value, UserSession.status == SessionStatus.ACTIVE)
+                        .first()
+                    )
                     if user_session:
                         user_session.status = SessionStatus.TERMINATED
                         user_session.terminated_at = datetime.utcnow()
@@ -395,32 +390,34 @@ async def logout_user(
             description="User logout (idempotent)",
             target_type="user_session",
             success=True,
-            after_data={"terminated": terminated}
+            after_data={"terminated": terminated},
         )
         return {"success": True, "message": "Logged out successfully"}
     except Exception:
         return {"success": True, "message": "Logged out successfully"}
 
+
 # =============== SYSTEM STATUS ENDPOINTS ===============
+
 
 @app.get("/api/health", response_model=HealthResponse)
 async def get_system_health():
     """
     Get system health status including database connectivity
-    
+
     Returns overall system status, database health, and statistics
     """
     try:
         # Get database health
         health_check = db_manager.health_check()
-        
+
         if health_check["status"] == "healthy":
             return HealthResponse(
                 status="healthy",
                 database_status="connected",
                 timestamp=datetime.utcnow(),
                 stats=health_check["stats"],
-                message="All systems operational"
+                message="All systems operational",
             )
         else:
             return HealthResponse(
@@ -428,26 +425,26 @@ async def get_system_health():
                 database_status="error",
                 timestamp=datetime.utcnow(),
                 stats={},
-                message=f"Database error: {health_check.get('error', 'Unknown error')}"
+                message=f"Database error: {health_check.get('error', 'Unknown error')}",
             )
-            
+
     except Exception as e:
         return HealthResponse(
             status="error",
             database_status="disconnected",
             timestamp=datetime.utcnow(),
             stats={},
-            message=f"System error: {str(e)}"
+            message=f"System error: {str(e)}",
         )
+
 
 # =============== ADMIN ENDPOINTS ===============
 @app.get("/api/debug/db")
-async def debug_database(
-    admin_user: User = Depends(get_admin_user)
-):
+async def debug_database(admin_user: User = Depends(get_admin_user)):
     """Admin-only DB diagnostics: connection test and health stats"""
     try:
         from database import db_manager as dm
+
         test = dm.test_connection()
         health = dm.health_check()
         return {
@@ -457,14 +454,12 @@ async def debug_database(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB debug failed: {str(e)}")
 
+
 @app.get("/api/admin/dashboard", response_model=AdminDashboardResponse)
-async def get_admin_dashboard(
-    admin_user: User = Depends(get_admin_user),
-    db: Session = Depends(get_database_session)
-):
+async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Session = Depends(get_database_session)):
     """
     Get comprehensive admin dashboard data
-    
+
     Returns:
     - All master forms with metadata
     - Form version history
@@ -472,59 +467,47 @@ async def get_admin_dashboard(
     - Recent operations (audit log)
     - Active user sessions
     - System statistics
-    
+
     Requires admin privileges.
     """
     try:
         print(f"🔍 Admin dashboard accessed by: {admin_user.username}")
         operation_logger = get_operation_logger()
-        
+
         # Use the passed db session instead of creating a new one
         session = db
-        from database_schema import (
-            MasterForm, FormVersion, UserFormSession,
-            FormOperation, UserSession, User
-        )
         from sqlalchemy import func
-            
+
+        from database_schema import FormOperation, FormVersion, MasterForm, User, UserFormSession, UserSession
+
         # Get master forms with metadata
         master_forms_query = session.query(MasterForm).order_by(MasterForm.created_at.desc()).limit(50)
         master_forms = []
         print(f"📊 Found {master_forms_query.count()} master forms")
         for form in master_forms_query:
-            master_forms.append({
-                "id": form.id,
-                "form_id": form.form_id,
-                "name": form.name,
-                "description": form.description,
-                "current_version": form.current_version,
-                "version_count": form.version_count,
-                "form_type": form.form_type,
-                "equipment_types": form.equipment_types,
-                "tags": form.tags,
-                "is_active": form.is_active,
-                "usage_count": form.usage_count,
-                "field_count": form.field_count,
-                "section_count": form.section_count,
-                "file_size": form.file_size,
-                "created_at": form.created_at.isoformat(),
-                "updated_at": form.updated_at.isoformat()
-            })
-        
-        # Get form versions - LIGHTWEIGHT METADATA ONLY
-        print("🔍 Starting form versions query...")
-        versions_query = session.query(
-            FormVersion.id,
-            FormVersion.master_form_id,
-            FormVersion.version,
-            FormVersion.is_current,
-            FormVersion.is_published,
-            FormVersion.file_size,
-            FormVersion.created_by,
-            FormVersion.change_summary,
-            FormVersion.created_at,
-            MasterForm.name
-        ).join(MasterForm, FormVersion.master_form_id == MasterForm.id).order_by(FormVersion.created_at.desc()).limit(20)
+            master_forms.append(
+                {
+                    "id": form.id,
+                    "form_id": form.form_id,
+                    "name": form.name,
+                    "description": form.description,
+                    "current_version": form.current_version,
+                    "version_count": form.version_count,
+                    "form_type": form.form_type,
+                    "equipment_types": form.equipment_types,
+                    "tags": form.tags,
+                    "is_active": form.is_active,
+                    "usage_count": form.usage_count,
+                    "field_count": form.field_count,
+                    "section_count": form.section_count,
+                    "file_size": form.file_size,
+                    "created_at": form.created_at.isoformat(),
+                    "updated_at": form.updated_at.isoformat(),
+                }
+            )
+
+        # Get form versions
+        versions_query = session.query(FormVersion).order_by(FormVersion.created_at.desc()).limit(100)
         form_versions = []
         for version in versions_query:
             form_versions.append({
@@ -619,25 +602,31 @@ async def get_admin_dashboard(
         
         # Get comprehensive statistics
         from database_schema import get_database_stats
+
         stats = get_database_stats(session)
-        
+
         # Add additional stats
-        stats.update({
-            "total_file_size": session.query(func.sum(MasterForm.file_size)).filter(MasterForm.file_size.isnot(None)).scalar() or 0,
-            "avg_processing_time": 0,  # Not applicable for user prompts
-            "successful_operations": session.query(FormOperation).filter(FormOperation.success == True).count(),
-            "failed_operations": session.query(FormOperation).filter(FormOperation.success == False).count()
-        })
-        
+        stats.update(
+            {
+                "total_file_size": session.query(func.sum(MasterForm.file_size))
+                .filter(MasterForm.file_size.isnot(None))
+                .scalar()
+                or 0,
+                "avg_processing_time": 0,  # Not applicable for user prompts
+                "successful_operations": session.query(FormOperation).filter(FormOperation.success == True).count(),
+                "failed_operations": session.query(FormOperation).filter(FormOperation.success == False).count(),
+            }
+        )
+
         # Log admin dashboard access
         operation_logger.log_operation(
             operation_type=OperationType.READ,
             description=f"Admin dashboard accessed by: {admin_user.username}",
             target_type="admin_dashboard",
             user_id=admin_user.id,
-            success=True
+            success=True,
         )
-        
+
         return AdminDashboardResponse(
             master_forms=master_forms,
             form_versions=form_versions,
@@ -645,14 +634,14 @@ async def get_admin_dashboard(
             recent_operations=recent_operations,
             active_sessions=active_sessions,
             stats=stats,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
         )
-        
+
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch admin dashboard data: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch admin dashboard data: {str(e)}"
         )
+
 
 # =============== CORE API ENDPOINTS ===============
 
@@ -861,7 +850,7 @@ async def update_user_role(
     user_id: int,
     payload: UpdateUserRoleRequest,
     admin_user: User = Depends(get_admin_user),
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
 ):
     """Promote/demote users between admin and editor. Admin-only.
     Guard: cannot demote the last remaining admin.
@@ -871,12 +860,14 @@ async def update_user_role(
         if role_target not in {"admin", "editor"}:
             raise HTTPException(status_code=400, detail="Role must be 'admin' or 'editor'")
 
-        from database_schema import User as DBUser, UserRole as UR
+        from database_schema import User as DBUser
+        from database_schema import UserRole as UR
+
         user = db.query(DBUser).filter(DBUser.id == user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        current_role = user.role.value if hasattr(user.role, 'value') else user.role
+        current_role = user.role.value if hasattr(user.role, "value") else user.role
         if current_role == role_target:
             return {"success": True, "message": "No change", "user_id": user_id, "role": current_role}
 
@@ -901,7 +892,7 @@ async def update_user_role(
             user_id=admin_user.id,
             success=True,
             before_data={"previous_role": current_role},
-            after_data={"new_role": role_target}
+            after_data={"new_role": role_target},
         )
 
         return {"success": True, "user_id": user_id, "role": role_target}
@@ -910,17 +901,17 @@ async def update_user_role(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update role: {str(e)}")
 
+
 @app.get("/api/admin/users")
-async def list_users(
-    admin_user: User = Depends(get_admin_user),
-    db: Session = Depends(get_database_session)
-):
+async def list_users(admin_user: User = Depends(get_admin_user), db: Session = Depends(get_database_session)):
     """List users for admin management (id, username, email, role, is_active, created_at)."""
     try:
         from database_schema import User as DBUser
+
         users = db.query(DBUser).order_by(DBUser.created_at.desc()).limit(500).all()
+
         def serialize(u):
-            role_value = u.role.value if hasattr(u.role, 'value') else u.role
+            role_value = u.role.value if hasattr(u.role, "value") else u.role
             return {
                 "id": u.id,
                 "username": u.username,
@@ -930,17 +921,20 @@ async def list_users(
                 "is_active": u.is_active,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
             }
+
         return {"users": [serialize(u) for u in users]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list users: {str(e)}")
 
+
 # Customization request endpoint removed - using user prompts instead
+
 
 @app.post("/api/upload")
 async def upload_file(
     file: UploadFile = File(...),
     current_user: User = Depends(require_editor_user),
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
 ):
     """
     Upload and analyze XML file
@@ -978,18 +972,23 @@ async def upload_file(
                 headers = editor.get_headers(table) if table is not None and hasattr(editor, "get_headers") else []
                 worksheets_info[name_attr] = {
                     "headers": headers,
-                    "row_count": int(table.get("{urn:schemas-microsoft-com:office:spreadsheet}ExpandedRowCount", "0")) if table is not None else 0,
+                    "row_count": int(table.get("{urn:schemas-microsoft-com:office:spreadsheet}ExpandedRowCount", "0"))
+                    if table is not None
+                    else 0,
                 }
         except Exception:
             worksheets_info = {}
 
         form_analysis: Dict[str, Any] = {
             "worksheets": worksheets_info,
-            "detected_choice_sheets": editor.detect_choice_worksheets() if hasattr(editor, "detect_choice_worksheets") else [],
+            "detected_choice_sheets": editor.detect_choice_worksheets()
+            if hasattr(editor, "detect_choice_worksheets")
+            else [],
         }
 
         # Persist user form session
-        from database_schema import UserFormSession, FormWorkStatus
+        from database_schema import FormWorkStatus, UserFormSession
+
         user_form_session = UserFormSession(
             id=session_uuid,
             user_id=current_user.id,
@@ -1016,7 +1015,7 @@ async def upload_file(
                 "file_size": len(content),
                 "worksheets": list(form_analysis.get("worksheets", {}).keys()),
                 "user_form_session_id": session_uuid,
-            }
+            },
         )
 
         return {
@@ -1027,7 +1026,7 @@ async def upload_file(
             "worksheets": list(form_analysis.get("worksheets", {}).keys()),
             "total_sheets": len(form_analysis.get("worksheets", {})),
             "analysis": form_analysis,
-            "uploaded_by": current_user.username
+            "uploaded_by": current_user.username,
         }
 
     except Exception as e:
@@ -1040,17 +1039,17 @@ async def upload_file(
             target_name=file.filename,
             user_id=current_user.id,
             success=False,
-            error_message=str(e)
+            error_message=str(e),
         )
         raise HTTPException(status_code=500, detail=f"Error analyzing uploaded form: {str(e)}")
 
 
 @app.post("/api/ai-edit")
 async def ai_edit_endpoint(
-    prompt: str, 
+    prompt: str,
     target_sheet: Optional[str] = None,
     current_user: User = Depends(require_editor_user),
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
 ):
     """
     AI-powered editing with natural language prompts
@@ -1067,11 +1066,14 @@ async def ai_edit_endpoint(
     4. Return success/failure status
     """
     # Find the user's active form session
-    from database_schema import UserFormSession, FormWorkStatus
-    user_form_session = db.query(UserFormSession).filter(
-        UserFormSession.user_id == current_user.id,
-        UserFormSession.status == FormWorkStatus.ACTIVE.value
-    ).order_by(UserFormSession.created_at.desc()).first()
+    from database_schema import FormWorkStatus, UserFormSession
+
+    user_form_session = (
+        db.query(UserFormSession)
+        .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+        .order_by(UserFormSession.created_at.desc())
+        .first()
+    )
 
     if not user_form_session or not user_form_session.original_file_path:
         raise HTTPException(status_code=400, detail="No form uploaded. Please upload an XML file first.")
@@ -1080,7 +1082,7 @@ async def ai_edit_endpoint(
         # Create LangGraph ReAct Agent
         # Choose working file: prefer last modified, else original
         working_file = user_form_session.modified_file_path or user_form_session.original_file_path
-        agent = create_proper_xlsform_agent(working_file)
+        agent = create_proper_xlsform_agent(working_file, base_original_path=user_form_session.original_file_path)
 
         # Add target sheet context to prompt if specified
         enhanced_prompt = prompt
@@ -1142,37 +1144,36 @@ async def ai_edit_endpoint(
         print(f"🔍 Processing AI edit prompt: {enhanced_prompt}")
         result = await agent.process_prompt(enhanced_prompt)
         print(f"🔍 AI edit result: {result}")
-        
-        # Check if the agent created a modified file
-        modified_file_created = False
-        latest_modified = None
-        
-        # Look for modified files created by the agent
-        import glob
-        original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
-        pattern = str(Path(user_form_session.original_file_path).parent / f"modified_{original_name}_*.xml")
-        print(f"🔍 Looking for modified files with pattern: {pattern}")
-        modified_files = glob.glob(pattern)
-        print(f"🔍 Found {len(modified_files)} modified files: {modified_files}")
-        
-        if modified_files:
-            latest_modified = max(modified_files, key=os.path.getctime)
-            modified_file_created = True
-            print(f"✅ Using latest modified file: {latest_modified}")
-        else:
-            print(f"🔍 No modified files found, will check for task-based edits")
-        
+
         # Store the prompt in edit history
         edit_history = user_form_session.edit_history_json or []
-        edit_history.append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "prompt": prompt,
-            "target_sheet": target_sheet,
-            "success": result.get("success", False),
-            "response": result.get("agent_response", "")
-        })
+        edit_history.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "prompt": prompt,
+                "target_sheet": target_sheet,
+                "success": result.get("success", False),
+                "response": result.get("agent_response", ""),
+            }
+        )
         user_form_session.edit_history_json = edit_history
 
+        if result["success"]:
+            # Check for modified file
+            modified_file_created = False
+            # Locate latest modified file next to original
+            import glob
+
+            original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
+            pattern = str(Path(user_form_session.original_file_path).parent / f"modified_*.xml")
+            print(f"🔍 Looking for modified files with pattern: {pattern}")
+            modified_files = glob.glob(pattern)
+            print(f"🔍 Found {len(modified_files)} modified files: {modified_files}")
+            latest_modified = None
+            if modified_files:
+                latest_modified = max(modified_files, key=os.path.getctime)
+                modified_file_created = True
+                print(f"✅ Using latest modified file: {latest_modified}")
 
         # Check for success indicators
         success_indicators = [
@@ -1234,8 +1235,8 @@ async def ai_edit_endpoint(
 
             # ================= Save form version to DB (full xml_content) =================
             try:
-                from database_schema import MasterForm, FormVersion
                 from database_manager import get_form_manager
+                from database_schema import FormVersion, MasterForm
 
                 # Derive a stable form name from original filename (without extension)
                 form_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
@@ -1308,7 +1309,7 @@ async def ai_edit_endpoint(
                         form_type="General",
                         equipment_types=[],
                         tags=[],
-                        created_by=current_user.id
+                        created_by=current_user.id,
                     )
                     # Refresh from DB
                     master_form = db.query(MasterForm).filter(MasterForm.name == form_name).first()
@@ -1358,8 +1359,22 @@ async def ai_edit_endpoint(
                     target_name=form_name,
                     user_id=current_user.id,
                     success=False,
-                    error_message=str(e)
+                    error_message=str(e),
                 )
+
+            # Update customization request as completed
+            try:
+                if customization_request_id:
+                    from database_schema import CustomizationRequest, RequestStatus
+                    req = db.query(CustomizationRequest).get(customization_request_id)
+                    if req:
+                        req.status = RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
+                        req.processing_completed_at = datetime.utcnow()
+                        db.add(req)
+                        db.commit()
+            except Exception as e:
+                print(f"⚠️ Failed to update customization request status: {str(e)}")
+                db.rollback()
 
             # Update customization request as completed
             try:
@@ -1402,7 +1417,7 @@ async def ai_edit_endpoint(
                 "summary": "Changes applied successfully",
                 "modified_file": user_form_session.modified_file_path,
                 "changes_applied": True,
-                "edited_by": current_user.username
+                "edited_by": current_user.username,
             }
         else:
             # AI edit failed - no changes were applied
@@ -1467,18 +1482,20 @@ async def ai_edit_endpoint(
 
 @app.get("/api/export/xml")
 async def export_xml(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_database_session)
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_database_session)
 ):
     """
     Download the modified XML file.
     Requires an edited file to exist; otherwise returns 400 instructing to run AI edit first.
     """
-    from database_schema import UserFormSession, FormWorkStatus
-    user_form_session = db.query(UserFormSession).filter(
-        UserFormSession.user_id == current_user.id,
-        UserFormSession.status == FormWorkStatus.ACTIVE.value
-    ).order_by(UserFormSession.created_at.desc()).first()
+    from database_schema import FormWorkStatus, UserFormSession
+
+    user_form_session = (
+        db.query(UserFormSession)
+        .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+        .order_by(UserFormSession.created_at.desc())
+        .first()
+    )
 
     if not user_form_session or not user_form_session.original_file_path:
         raise HTTPException(status_code=400, detail="No form uploaded. Please upload an XML file first.")
@@ -1525,6 +1542,7 @@ async def export_xml(
         # Return DB content as file download
         print(f"📄 Serving XML from DB: {len(xml_content)} characters, filename: {export_filename}")
         from fastapi.responses import Response
+
         return Response(
             content=xml_content,
             media_type="application/xml",
@@ -1560,23 +1578,24 @@ async def export_xml(
             target_type="file_export",
             user_id=current_user.id,
             success=False,
-            error_message=str(e)
+            error_message=str(e),
         )
         raise HTTPException(status_code=500, detail=f"Export error: {str(e)}")
 
 
 @app.post("/api/sessions/reset")
 async def reset_active_session(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_database_session)
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_database_session)
 ):
     """Mark any active user form session as completed so a fresh login does not see previous uploads."""
     try:
-        from database_schema import UserFormSession, FormWorkStatus
-        active = db.query(UserFormSession).filter(
-            UserFormSession.user_id == current_user.id,
-            UserFormSession.status == FormWorkStatus.ACTIVE.value
-        ).all()
+        from database_schema import FormWorkStatus, UserFormSession
+
+        active = (
+            db.query(UserFormSession)
+            .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+            .all()
+        )
         count = 0
         for s in active:
             s.status = FormWorkStatus.COMPLETED.value
@@ -1589,7 +1608,7 @@ async def reset_active_session(
             target_type="user_form_session",
             user_id=current_user.id,
             success=True,
-            after_data={"reset_count": count}
+            after_data={"reset_count": count},
         )
         return {"success": True, "reset_count": count}
     except Exception as e:
@@ -1598,19 +1617,21 @@ async def reset_active_session(
 
 @app.get("/api/status")
 async def get_status(
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_database_session)
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_database_session)
 ):
     """
     Get current user session status (alias of /api/my-status)
 
     Shows what file is loaded, if there are modifications, and recent edit history
     """
-    from database_schema import UserFormSession, FormWorkStatus
-    ufs = db.query(UserFormSession).filter(
-        UserFormSession.user_id == current_user.id,
-        UserFormSession.status == FormWorkStatus.ACTIVE.value
-    ).order_by(UserFormSession.created_at.desc()).first()
+    from database_schema import FormWorkStatus, UserFormSession
+
+    ufs = (
+        db.query(UserFormSession)
+        .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+        .order_by(UserFormSession.created_at.desc())
+        .first()
+    )
     if not ufs:
         return {
             "has_file_uploaded": False,
@@ -1625,13 +1646,14 @@ async def get_status(
     analysis = ufs.analysis_json or {}
     worksheets = list(analysis.get("worksheets", {}).keys()) if analysis else []
     history = ufs.edit_history_json or []
-    
+
     # Get a better display name for modified file
     modified_file_display = None
     if ufs.modified_file_path:
         original_name = os.path.basename(ufs.original_file_path).replace(".xml", "")
         # Check if there's a form version in DB for this user
-        from database_schema import MasterForm, FormVersion
+        from database_schema import FormVersion, MasterForm
+
         master = db.query(MasterForm).filter(MasterForm.name == original_name).first()
         if master:
             version = (
@@ -1643,7 +1665,7 @@ async def get_status(
             )
             if version:
                 modified_file_display = f"{original_name}_{version.version}.xml"
-        
+
         # Fallback to file path if no DB version
         if not modified_file_display:
             modified_file_display = ufs.modified_file_path
