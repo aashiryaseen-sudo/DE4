@@ -1143,7 +1143,7 @@ async def ai_edit_endpoint(
         # Process the prompt using the ReAct agent
         print(f"🔍 Processing AI edit prompt: {enhanced_prompt}")
         result = await agent.process_prompt(enhanced_prompt)
-        print(f"🔍 AI edit result: {result}")
+        # print(f"🔍 AI edit result: {result}")
 
         # Store the prompt in edit history
         edit_history = user_form_session.edit_history_json or []
