@@ -1676,14 +1676,27 @@ async def export_xml(
             after_data={"file_type": file_type, "has_modifications": True, "source": "database"}
         )
 
-        # Reset the user form session after successful export
+        # Reset ALL active user form sessions after successful export
         try:
-            from database_schema import FormWorkStatus
-            user_form_session.status = FormWorkStatus.COMPLETED.value
-            user_form_session.updated_at = datetime.utcnow()
-            db.add(user_form_session)
+            from database_schema import FormWorkStatus, UserFormSession
+
+            active_sessions = (
+                db.query(UserFormSession)
+                .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+                .all()
+            )
+            reset_count = 0
+            for s in active_sessions:
+                s.status = FormWorkStatus.COMPLETED.value
+                s.original_file_path = None
+                s.modified_file_path = None
+                s.analysis_json = None
+                s.edit_history_json = []
+                s.updated_at = datetime.utcnow()
+                db.add(s)
+                reset_count += 1
             db.commit()
-            print(f"✅ User form session reset after export for user {current_user.id}")
+            print(f"✅ Reset {reset_count} active user form sessions after export for user {current_user.id}")
         except Exception as e:
             print(f"⚠️ Failed to reset user form session after export: {str(e)}")
             db.rollback()
