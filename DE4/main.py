@@ -1395,23 +1395,32 @@ async def ai_edit_endpoint(
                 print(f"⚠️ Failed to update customization request status: {str(e)}")
                 db.rollback()
 
-            # Log AI edit operation
-            operation_logger = get_operation_logger()
-            operation_logger.log_operation(
-                operation_type=OperationType.UPDATE,
-                description=f"AI edit applied: {prompt[:100]}",
-                target_type="xml_file",
-                target_name=current_uploaded_file,
-                user_id=current_user.id,
-                success=True,
-                before_data={"prompt": prompt, "target_sheet": target_sheet},
-                after_data={
-                    "tool_calls_made": tool_calls_made,
-                    "modified_file": user_form_session.modified_file_path,
-                    "changes_applied": modified_file_created,
-                    "customization_request_id": customization_request_id
-                }
-            )
+            # Log AI edit operation (fixed database transaction issue)
+            try:
+                # Use a fresh database session for logging to avoid transaction conflicts
+                from database_manager import get_database_session
+                log_db = next(get_database_session())
+                operation_logger = get_operation_logger()
+                operation_logger.log_operation(
+                    operation_type=OperationType.UPDATE,
+                    description=f"AI edit applied: {prompt[:100]}",
+                    target_type="xml_file",
+                    target_name=current_uploaded_file,
+                    user_id=current_user.id,
+                    success=True,
+                    before_data={"prompt": prompt, "target_sheet": target_sheet},
+                    after_data={
+                        "tool_calls_made": tool_calls_made,
+                        "modified_file": user_form_session.modified_file_path,
+                        "changes_applied": modified_file_created,
+                        "customization_request_id": customization_request_id
+                    }
+                )
+                log_db.close()
+                print("✅ Operation logged successfully")
+            except Exception as log_e:
+                print(f"⚠️ Operation logging failed (non-critical): {log_e}")
+                # Continue with response even if logging fails
 
             return {
                 "success": True,
@@ -1517,6 +1526,10 @@ async def export_xml(
         export_filename = f"{original_name}_modified.xml"  # Default filename
         file_type = "modified"
         xml_content: str = None
+        
+        print(f"🔍 DEBUG: Starting export for user {current_user.id}")
+        print(f"🔍 DEBUG: original_name = '{original_name}'")
+        print(f"🔍 DEBUG: default export_filename = '{export_filename}'")
 
         # Find master form
         master = db.query(MasterForm).filter(MasterForm.name == original_name).first()
@@ -1535,15 +1548,26 @@ async def export_xml(
         )
         
         if not version:
+            print(f"❌ DEBUG: No version found for user {current_user.id}, master_form_id {master.id}")
             raise HTTPException(status_code=404, detail="No edited version found. Please run AI Edit first.")
         
         if not version.xml_content:
+            print(f"❌ DEBUG: Version found but no XML content")
             raise HTTPException(status_code=404, detail="No XML content available in the edited version")
         
         print(f"✅ Exporting from DB: version {version.version} (created: {version.created_at})")
+        print(f"🔍 DEBUG: original_name = '{original_name}'")
+        print(f"🔍 DEBUG: version.version = '{version.version}'")
         
         # Use the same naming logic as the status endpoint for consistency
         export_filename = f"{original_name}_{version.version}.xml"
+        print(f"🔍 DEBUG: UPDATED export_filename = '{export_filename}'")
+        
+        # URL encode the filename to handle special characters
+        import urllib.parse
+        encoded_filename = urllib.parse.quote(export_filename)
+        print(f"🔍 DEBUG: encoded_filename = '{encoded_filename}'")
+        
         xml_content = version.xml_content
 
         # Return DB content as file download
@@ -1574,11 +1598,14 @@ async def export_xml(
             print(f"⚠️ Failed to reset user form session after export: {str(e)}")
             db.rollback()
 
+        print(f"🔍 DEBUG: FINAL export_filename being sent = '{export_filename}'")
+        print(f"🔍 DEBUG: FINAL Content-Disposition = 'attachment; filename=\"{export_filename}\"; filename*=UTF-8''{encoded_filename}'")
+        
         return Response(
             content=xml_content,
             media_type="application/xml",
             headers={
-                "Content-Disposition": f"attachment; filename={export_filename}",
+                "Content-Disposition": f"attachment; filename=\"{export_filename}\"; filename*=UTF-8''{encoded_filename}",
                 "X-File-Type": file_type,
                 "X-Has-Modifications": "true",
                 "X-Exported-By": current_user.username,
