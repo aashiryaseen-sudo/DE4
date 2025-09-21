@@ -438,6 +438,42 @@ async def get_system_health():
         )
 
 
+@app.get("/api/debug/form-versions")
+async def debug_form_versions(admin_user: User = Depends(get_admin_user), db: Session = Depends(get_database_session)):
+    """Debug endpoint to check form versions and their XML content."""
+    try:
+        from database_schema import FormVersion, MasterForm
+        
+        versions = db.query(FormVersion).order_by(FormVersion.created_at.desc()).limit(10).all()
+        
+        debug_data = []
+        for version in versions:
+            has_xml = bool(version.xml_content and len(version.xml_content.strip()) > 0)
+            master_name = "Unknown"
+            if version.master_form_id:
+                master = db.query(MasterForm).filter(MasterForm.id == version.master_form_id).first()
+                master_name = master.name if master else f"Form {version.master_form_id}"
+            
+            debug_data.append({
+                "id": version.id,
+                "version": version.version,
+                "master_form_name": master_name,
+                "created_by": version.created_by,
+                "created_at": version.created_at.isoformat(),
+                "has_xml_content": has_xml,
+                "xml_length": len(version.xml_content) if version.xml_content else 0,
+                "xml_preview": version.xml_content[:100] + "..." if version.xml_content and len(version.xml_content) > 100 else version.xml_content
+            })
+        
+        return {
+            "total_versions": len(debug_data),
+            "versions": debug_data
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
+
+
 # =============== ADMIN ENDPOINTS ===============
 @app.get("/api/debug/db")
 async def debug_database(admin_user: User = Depends(get_admin_user)):
@@ -507,9 +543,26 @@ async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Se
             )
 
         # Get form versions
-        versions_query = session.query(FormVersion).order_by(FormVersion.created_at.desc()).limit(100)
+        # Optimized query - exclude xml_content column to avoid loading huge data
+        versions_query = session.query(
+            FormVersion.id,
+            FormVersion.master_form_id,
+            FormVersion.version,
+            FormVersion.is_current,
+            FormVersion.is_published,
+            FormVersion.file_size,
+            FormVersion.created_by,
+            FormVersion.change_summary,
+            FormVersion.created_at
+        ).order_by(FormVersion.created_at.desc()).limit(50)
         form_versions = []
         for version in versions_query:
+            # Get master form name separately to avoid lazy loading
+            master_form_name = None
+            if version.master_form_id:
+                master = session.query(MasterForm).filter(MasterForm.id == version.master_form_id).first()
+                master_form_name = master.name if master else f"Form {version.master_form_id}"
+            
             form_versions.append({
                 "id": version.id,
                 "master_form_id": version.master_form_id,
@@ -520,8 +573,7 @@ async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Se
                 "created_by": version.created_by,
                 "change_summary": version.change_summary,
                 "created_at": version.created_at.isoformat(),
-                "master_form_name": version.name,  # Use actual master form name
-                "has_xml_content": True  # Assume true for now
+                "master_form_name": master_form_name
             })
         print(f"📋 Found {len(form_versions)} form versions")
         
@@ -755,67 +807,6 @@ async def delete_master_form(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
-
-
-@app.get("/api/admin/form-versions/{version_id}/download")
-async def download_form_version(
-    version_id: int,
-    admin_user: User = Depends(get_admin_user),
-    db: Session = Depends(get_database_session)
-):
-    """Admin-only: Download XML content for a specific form version."""
-    try:
-        from database_schema import FormVersion
-        version = db.query(FormVersion).filter(FormVersion.id == version_id).first()
-        if not version:
-            raise HTTPException(status_code=404, detail="Form version not found")
-        
-        # Check if admin user has access to this version (admin can access all, but let's be safe)
-        print(f"🔍 Downloading version {version_id} - created_by: {version.created_by}, admin_user: {admin_user.id}")
-        
-        if not version.xml_content or len(version.xml_content.strip()) == 0:
-            print(f"❌ Form version {version_id} has empty XML content (length: {len(version.xml_content) if version.xml_content else 0})")
-            print(f"🔍 Version details: created_by={version.created_by}, version={version.version}, created_at={version.created_at}")
-            raise HTTPException(status_code=404, detail="No XML content available in this form version")
-        
-        print(f"✅ Form version {version_id} has XML content (length: {len(version.xml_content)})")
-        
-        # Generate filename - avoid relationship access
-        master_form_name = "Unknown"
-        if version.master_form_id:
-            master = db.query(MasterForm).filter(MasterForm.id == version.master_form_id).first()
-            master_form_name = master.name if master else f"Form_{version.master_form_id}"
-        
-        filename = f"{master_form_name}_{version.version}.xml"
-        
-        # Log download
-        get_operation_logger().log_operation(
-            operation_type=OperationType.READ,
-            description=f"Form version downloaded: {filename}",
-            target_type="form_version",
-            target_id=str(version_id),
-            target_name=filename,
-            user_id=admin_user.id,
-            success=True
-        )
-        
-        # Return XML content as file download
-        from fastapi.responses import Response
-        return Response(
-            content=version.xml_content,
-            media_type="application/xml",
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}",
-                "X-Form-Name": master_form_name,
-                "X-Version": version.version,
-                "X-Created-By": str(version.created_by) if version.created_by else "Unknown"
-            }
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
 
 @app.post("/api/admin/purge-db")
@@ -1194,22 +1185,34 @@ async def ai_edit_endpoint(
             '"completed_tasks"' in agent_response,
             'Successfully completed' in agent_response,
             '✅' in agent_response,
-            '"execution_completed": true' in agent_response
+            '"execution_completed": true' in agent_response,
+            'Successfully modified' in agent_response,  # Add this pattern
+            'successfully updated' in agent_response.lower(),  # Add this pattern
         ])
         
-        # Check for failure indicators in the response
+        # Check for failure indicators in the response (be more specific to avoid false positives)
         has_failure_indicators = any([
             'could not be completed' in agent_response.lower(),
-            'was not found' in agent_response.lower(),
-            'not found' in agent_response.lower(),
-            'error' in agent_response.lower(),
-            'failed' in agent_response.lower(),
-            'unable to' in agent_response.lower()
+            'was not found' in agent_response.lower() and 'not found in' in agent_response.lower(),
+            'error occurred' in agent_response.lower(),
+            'failed to' in agent_response.lower(),
+            'unable to complete' in agent_response.lower(),
+            'execution failed' in agent_response.lower(),
         ])
         
         # Determine if changes were actually applied
         changes_applied = modified_file_created or (has_successful_tasks and not has_failure_indicators)
         actual_success = changes_applied and (tool_calls_made > 0 or has_successful_tasks) and not has_failure_indicators
+        
+        # Debug logging
+        print(f"🔍 Success detection debug:")
+        print(f"  - modified_file_created: {modified_file_created}")
+        print(f"  - has_successful_tasks: {has_successful_tasks}")
+        print(f"  - has_failure_indicators: {has_failure_indicators}")
+        print(f"  - tool_calls_made: {tool_calls_made}")
+        print(f"  - changes_applied: {changes_applied}")
+        print(f"  - actual_success: {actual_success}")
+        print(f"  - agent_response preview: {agent_response[:200]}...")
         
         # Update history regardless of success/failure
         history = user_form_session.edit_history_json or []
@@ -1336,20 +1339,22 @@ async def ai_edit_endpoint(
                     print(f"✅ Saved version to DB: {new_version.version} with {len(xml_content)} characters")
                     print(f"🔍 DEBUG: XML content preview: {xml_content[:200]}...")
                     
-                    # Verify what was actually saved
-                    saved_version = db.query(FormVersion).filter(FormVersion.id == new_version.id).first()
-                    if saved_version:
-                        saved_xml_len = len(saved_version.xml_content) if saved_version.xml_content else 0
-                        print(f"🔍 DEBUG: Verified saved XML length: {saved_xml_len}")
-                        if saved_xml_len == 0:
-                            print(f"❌ WARNING: XML content was not saved properly!")
-                    else:
-                        print(f"❌ ERROR: Could not retrieve saved version from DB")
+                    # Verify what was actually saved (non-critical check)
+                    try:
+                        saved_version = db.query(FormVersion).filter(FormVersion.id == new_version.id).first()
+                        if saved_version:
+                            saved_xml_len = len(saved_version.xml_content) if saved_version.xml_content else 0
+                            print(f"🔍 DEBUG: Verified saved XML length: {saved_xml_len}")
+                            if saved_xml_len == 0:
+                                print(f"❌ WARNING: XML content was not saved properly!")
+                        else:
+                            print(f"❌ ERROR: Could not retrieve saved version from DB")
+                    except Exception as verify_e:
+                        print(f"⚠️ Verification failed (non-critical): {verify_e}")
 
             except Exception as e:
                 print(f"❌ Failed to save version to DB: {str(e)}")
-                # Rollback the transaction and start fresh
-                db.rollback()
+                # Don't rollback - the commit already happened, just log the error
                 # Non-fatal: version save failed shouldn't break edit response
                 operation_logger = get_operation_logger()
                 operation_logger.log_operation(
@@ -1536,12 +1541,38 @@ async def export_xml(
             raise HTTPException(status_code=404, detail="No XML content available in the edited version")
         
         print(f"✅ Exporting from DB: version {version.version} (created: {version.created_at})")
+        
+        # Use the same naming logic as the status endpoint for consistency
         export_filename = f"{original_name}_{version.version}.xml"
         xml_content = version.xml_content
 
         # Return DB content as file download
         print(f"📄 Serving XML from DB: {len(xml_content)} characters, filename: {export_filename}")
         from fastapi.responses import Response
+
+        # Log export operation BEFORE returning the response
+        operation_logger = get_operation_logger()
+        operation_logger.log_operation(
+            operation_type=OperationType.READ,
+            description=f"File exported from DB: {export_filename}",
+            target_type="file_export",
+            target_name=export_filename,
+            user_id=current_user.id,
+            success=True,
+            after_data={"file_type": file_type, "has_modifications": True, "source": "database"}
+        )
+
+        # Reset the user form session after successful export
+        try:
+            from database_schema import FormWorkStatus
+            user_form_session.status = FormWorkStatus.COMPLETED.value
+            user_form_session.updated_at = datetime.utcnow()
+            db.add(user_form_session)
+            db.commit()
+            print(f"✅ User form session reset after export for user {current_user.id}")
+        except Exception as e:
+            print(f"⚠️ Failed to reset user form session after export: {str(e)}")
+            db.rollback()
 
         return Response(
             content=xml_content,
@@ -1554,18 +1585,6 @@ async def export_xml(
                 "X-Version": version.version,
                 "X-Created-At": version.created_at.isoformat()
             },
-        )
-
-        # Log export operation
-        operation_logger = get_operation_logger()
-        operation_logger.log_operation(
-            operation_type=OperationType.READ,
-            description=f"File exported from DB: {export_filename}",
-            target_type="file_export",
-            target_name=export_filename,
-            user_id=current_user.id,
-            success=True,
-            after_data={"file_type": file_type, "has_modifications": True, "source": "database"}
         )
 
     except HTTPException:
