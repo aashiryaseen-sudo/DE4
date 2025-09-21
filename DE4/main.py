@@ -5,6 +5,9 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+import gzip
+import base64
+import hashlib
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +45,41 @@ from models import (
     XLSFormStats,
 )
 from xml_parser import create_xml_editor
+import gzip
+import base64
+import hashlib
+
+# =============== XML COMPRESSION HELPERS ===============
+
+def compress_xml_to_base64(xml_text: str) -> str:
+    try:
+        return base64.b64encode(gzip.compress(xml_text.encode("utf-8"))).decode("utf-8")
+    except Exception:
+        return xml_text
+
+
+def decompress_xml_from_base64(data: str) -> str:
+    try:
+        raw = base64.b64decode(data.encode("utf-8"))
+        return gzip.decompress(raw).decode("utf-8")
+    except Exception:
+        return data
+
+# =============== XML COMPRESSION HELPERS ===============
+
+def compress_xml_to_base64(xml_text: str) -> str:
+    try:
+        return base64.b64encode(gzip.compress(xml_text.encode("utf-8"))).decode("utf-8")
+    except Exception:
+        return xml_text
+
+
+def decompress_xml_from_base64(data: str) -> str:
+    try:
+        raw = base64.b64decode(data.encode("utf-8"))
+        return gzip.decompress(raw).decode("utf-8")
+    except Exception:
+        return data
 
 app = FastAPI(
     title="DE4 Forms Platform API",
@@ -977,7 +1015,7 @@ async def upload_file(
             else [],
         }
 
-        # Persist user form session
+        # Persist user form session (batch add + commit once below)
         from database_schema import FormWorkStatus, UserFormSession
 
         user_form_session = UserFormSession(
@@ -990,7 +1028,6 @@ async def upload_file(
             edit_history_json=[],
         )
         db.add(user_form_session)
-        db.commit()
 
         # Log file upload operation
         operation_logger = get_operation_logger()
@@ -1008,6 +1045,9 @@ async def upload_file(
                 "user_form_session_id": session_uuid,
             },
         )
+
+        # Single commit for session + log insert to reduce round trips
+        db.commit()
 
         return {
             "success": True,
@@ -1234,9 +1274,9 @@ async def ai_edit_endpoint(
                 # Mark session as having modifications even if no file was created
                 # This enables the export button for task-based edits
                 user_form_session.modified_file_path = "task_based_edit"
-            db.commit()
+            # Defer commit to batch with version save
 
-            # ================= Save form version to DB (full xml_content) =================
+            # ================= Save form version to DB (compressed or path-only) =================
             try:
                 from database_manager import get_form_manager
                 from database_schema import FormVersion, MasterForm
@@ -1318,26 +1358,57 @@ async def ai_edit_endpoint(
                     master_form = db.query(MasterForm).filter(MasterForm.name == form_name).first()
                 else:
                     # For existing master form, add a new version as a draft (do not mark as current)
-                    new_version = FormVersion(
-                        master_form_id=master_form.id,
-                        version=f"{form_name}_{timestamp_version}",  # Descriptive version name
-                        xml_content=xml_content or "",
-                        xml_compressed=False,
-                        form_structure=None,
-                        field_names=None,
-                        choice_lists=None,
-                        file_path=latest_modified if latest_modified else "task_based_edit",
-                        file_size=os.path.getsize(latest_modified) if latest_modified and os.path.exists(latest_modified) else None,
-                        file_checksum=None,
-                        created_by=current_user.id,
-                        change_summary=f"AI edit: {prompt[:50]}..." if len(prompt) > 50 else f"AI edit: {prompt}",
-                        is_current=False,
-                        is_published=False,
-                    )
+                    storage_mode = os.getenv("XML_STORE_MODE", "compressed").lower()
+                    version_name = f"{form_name}_{timestamp_version}"
+
+                    # Prefer storing file path to avoid large DB payloads
+                    if storage_mode in {"path", "path_only", "file"} and latest_modified and os.path.exists(latest_modified):
+                        file_size = os.path.getsize(latest_modified)
+                        try:
+                            with open(latest_modified, "rb") as fbin:
+                                file_checksum = hashlib.sha256(fbin.read()).hexdigest()
+                        except Exception:
+                            file_checksum = None
+                        new_version = FormVersion(
+                            master_form_id=master_form.id,
+                            version=version_name,
+                            xml_content="",  # Empty to indicate external storage
+                            xml_compressed=False,
+                            form_structure=None,
+                            field_names=None,
+                            choice_lists=None,
+                            file_path=latest_modified,
+                            file_size=file_size,
+                            file_checksum=file_checksum,
+                            created_by=current_user.id,
+                            change_summary=f"AI edit: {prompt[:50]}..." if len(prompt) > 50 else f"AI edit: {prompt}",
+                            is_current=False,
+                            is_published=False,
+                        )
+                    else:
+                        # Store compressed content in DB as fallback/default
+                        compressed_b64 = compress_xml_to_base64(xml_content)
+                        new_version = FormVersion(
+                            master_form_id=master_form.id,
+                            version=version_name,
+                            xml_content=compressed_b64,
+                            xml_compressed=True,
+                            form_structure=None,
+                            field_names=None,
+                            choice_lists=None,
+                            file_path=latest_modified if latest_modified else "task_based_edit",
+                            file_size=len(xml_content.encode("utf-8")),
+                            file_checksum=None,
+                            created_by=current_user.id,
+                            change_summary=f"AI edit: {prompt[:50]}..." if len(prompt) > 50 else f"AI edit: {prompt}",
+                            is_current=False,
+                            is_published=False,
+                        )
+
                     db.add(new_version)
-                    db.commit()
-                    print(f"✅ Saved version to DB: {new_version.version} with {len(xml_content)} characters")
-                    print(f"🔍 DEBUG: XML content preview: {xml_content[:200]}...")
+                    # Batch commit with session updates below
+                    print(f"✅ Prepared version for DB: {version_name} (mode={os.getenv('XML_STORE_MODE', 'compressed')})")
+                    print(f"🔍 DEBUG: Prepared XML length: {len(xml_content)}")
                     
                     # Verify what was actually saved (non-critical check)
                     try:
@@ -1351,6 +1422,11 @@ async def ai_edit_endpoint(
                             print(f"❌ ERROR: Could not retrieve saved version from DB")
                     except Exception as verify_e:
                         print(f"⚠️ Verification failed (non-critical): {verify_e}")
+
+                # Finally commit session changes and new version together
+                # Commit includes: user_form_session.modified_file_path/history and new version
+                db.commit()
+                print("✅ Batched commit completed for AI edit success path")
 
             except Exception as e:
                 print(f"❌ Failed to save version to DB: {str(e)}")
@@ -1519,7 +1595,7 @@ async def export_xml(
         raise HTTPException(status_code=400, detail="No edited file to export. Run AI Edit first.")
 
     try:
-        # Export from DB-stored form version content ONLY
+        # Export using lazy loading: prefer file_path; if not, use DB content and decompress when needed
         from database_schema import MasterForm, FormVersion
 
         original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
@@ -1551,11 +1627,27 @@ async def export_xml(
             print(f"❌ DEBUG: No version found for user {current_user.id}, master_form_id {master.id}")
             raise HTTPException(status_code=404, detail="No edited version found. Please run AI Edit first.")
         
-        if not version.xml_content:
-            print(f"❌ DEBUG: Version found but no XML content")
-            raise HTTPException(status_code=404, detail="No XML content available in the edited version")
+        # Determine content source
+        xml_content: Optional[str] = None
+        if version.file_path and os.path.exists(version.file_path):
+            print(f"✅ Exporting from file path: {version.file_path}")
+            try:
+                with open(version.file_path, "r", encoding="utf-8") as xf:
+                    xml_content = xf.read()
+                file_type = "modified_file"
+            except Exception as fe:
+                print(f"⚠️ Failed reading file_path; will attempt DB content: {fe}")
         
-        print(f"✅ Exporting from DB: version {version.version} (created: {version.created_at})")
+        if xml_content is None:
+            if not version.xml_content:
+                print(f"❌ DEBUG: Version found but no XML content or file path")
+                raise HTTPException(status_code=404, detail="No XML content available in the edited version")
+            # Decompress if flagged
+            xml_content = decompress_xml_from_base64(version.xml_content) if getattr(version, 'xml_compressed', False) else version.xml_content
+            print(f"✅ Exporting from DB content (compressed={getattr(version, 'xml_compressed', False)})")
+            file_type = "database"
+
+        print(f"✅ Export source resolved for version {version.version} (created: {version.created_at})")
         print(f"🔍 DEBUG: original_name = '{original_name}'")
         print(f"🔍 DEBUG: version.version = '{version.version}'")
         
@@ -1568,10 +1660,8 @@ async def export_xml(
         encoded_filename = urllib.parse.quote(export_filename)
         print(f"🔍 DEBUG: encoded_filename = '{encoded_filename}'")
         
-        xml_content = version.xml_content
-
         # Return DB content as file download
-        print(f"📄 Serving XML from DB: {len(xml_content)} characters, filename: {export_filename}")
+        print(f"📄 Serving XML: {len(xml_content)} characters, filename: {export_filename}")
         from fastapi.responses import Response
 
         # Log export operation BEFORE returning the response

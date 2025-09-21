@@ -419,9 +419,21 @@ class FormManager:
                 # Generate form ID
                 form_id = f"form_{generate_uuid()[:8]}"
                 
-                # Calculate file info
+                # Calculate file info (use original content for size/hash)
                 file_size = len(xml_content.encode('utf-8'))
                 file_checksum = hashlib.sha256(xml_content.encode('utf-8')).hexdigest()
+
+                # Compress XML content to reduce DB size
+                try:
+                    import gzip, base64
+                    compressed_bytes = gzip.compress(xml_content.encode('utf-8'))
+                    compressed_b64 = base64.b64encode(compressed_bytes).decode('utf-8')
+                    xml_content_db = compressed_b64
+                    xml_compressed_flag = True
+                except Exception:
+                    # Fallback: store as-is if compression fails
+                    xml_content_db = xml_content
+                    xml_compressed_flag = False
                 
                 # Create master form
                 master_form = MasterForm(
@@ -439,11 +451,12 @@ class FormManager:
                 session.add(master_form)
                 session.flush()  # Get the ID
                 
-                # Create initial version
+                # Create initial version (store compressed XML)
                 form_version = FormVersion(
                     master_form_id=master_form.id,
                     version=version,
-                    xml_content=xml_content,
+                    xml_content=xml_content_db,
+                    xml_compressed=xml_compressed_flag,
                     is_current=True,
                     is_published=True,
                     file_size=file_size,
