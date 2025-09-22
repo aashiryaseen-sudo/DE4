@@ -1,3 +1,6 @@
+import base64
+import gzip
+import hashlib
 import json
 import os
 import tempfile
@@ -5,9 +8,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-import gzip
-import base64
-import hashlib
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,11 +45,9 @@ from models import (
     XLSFormStats,
 )
 from xml_parser import create_xml_editor
-import gzip
-import base64
-import hashlib
 
 # =============== XML COMPRESSION HELPERS ===============
+
 
 def compress_xml_to_base64(xml_text: str) -> str:
     try:
@@ -65,7 +63,9 @@ def decompress_xml_from_base64(data: str) -> str:
     except Exception:
         return data
 
+
 # =============== XML COMPRESSION HELPERS ===============
+
 
 def compress_xml_to_base64(xml_text: str) -> str:
     try:
@@ -80,6 +80,7 @@ def decompress_xml_from_base64(data: str) -> str:
         return gzip.decompress(raw).decode("utf-8")
     except Exception:
         return data
+
 
 app = FastAPI(
     title="DE4 Forms Platform API",
@@ -208,6 +209,7 @@ class AdminDashboardResponse(BaseModel):
 class UpdateUserRoleRequest(BaseModel):
     role: str
 
+
 class MasterFormUpsertRequest(BaseModel):
     name: str
     current_version: str
@@ -222,8 +224,10 @@ class MasterFormUpsertRequest(BaseModel):
     file_size: Optional[int] = None
     file_checksum: Optional[str] = None
 
+
 class PurgeConfirmRequest(BaseModel):
     confirm: bool
+
 
 # CustomizationRequest removed - using user prompts instead
 
@@ -414,7 +418,9 @@ async def logout_user(
                         .filter(UserSession.session_token == token_value, UserSession.status == SessionStatus.ACTIVE)
                         .first()
                     )
+                    user_id_for_log = None
                     if user_session:
+                        user_id_for_log = user_session.user_id  # Get the ID before committing
                         user_session.status = SessionStatus.TERMINATED
                         user_session.terminated_at = datetime.utcnow()
                         session.commit()
@@ -428,6 +434,7 @@ async def logout_user(
             description="User logout (idempotent)",
             target_type="user_session",
             success=True,
+            user_id=user_id_for_log,
             after_data={"terminated": terminated},
         )
         return {"success": True, "message": "Logged out successfully"}
@@ -481,9 +488,9 @@ async def debug_form_versions(admin_user: User = Depends(get_admin_user), db: Se
     """Debug endpoint to check form versions and their XML content."""
     try:
         from database_schema import FormVersion, MasterForm
-        
+
         versions = db.query(FormVersion).order_by(FormVersion.created_at.desc()).limit(10).all()
-        
+
         debug_data = []
         for version in versions:
             has_xml = bool(version.xml_content and len(version.xml_content.strip()) > 0)
@@ -491,23 +498,24 @@ async def debug_form_versions(admin_user: User = Depends(get_admin_user), db: Se
             if version.master_form_id:
                 master = db.query(MasterForm).filter(MasterForm.id == version.master_form_id).first()
                 master_name = master.name if master else f"Form {version.master_form_id}"
-            
-            debug_data.append({
-                "id": version.id,
-                "version": version.version,
-                "master_form_name": master_name,
-                "created_by": version.created_by,
-                "created_at": version.created_at.isoformat(),
-                "has_xml_content": has_xml,
-                "xml_length": len(version.xml_content) if version.xml_content else 0,
-                "xml_preview": version.xml_content[:100] + "..." if version.xml_content and len(version.xml_content) > 100 else version.xml_content
-            })
-        
-        return {
-            "total_versions": len(debug_data),
-            "versions": debug_data
-        }
-        
+
+            debug_data.append(
+                {
+                    "id": version.id,
+                    "version": version.version,
+                    "master_form_name": master_name,
+                    "created_by": version.created_by,
+                    "created_at": version.created_at.isoformat(),
+                    "has_xml_content": has_xml,
+                    "xml_length": len(version.xml_content) if version.xml_content else 0,
+                    "xml_preview": version.xml_content[:100] + "..."
+                    if version.xml_content and len(version.xml_content) > 100
+                    else version.xml_content,
+                }
+            )
+
+        return {"total_versions": len(debug_data), "versions": debug_data}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Debug failed: {str(e)}")
 
@@ -582,17 +590,21 @@ async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Se
 
         # Get form versions
         # Optimized query - exclude xml_content column to avoid loading huge data
-        versions_query = session.query(
-            FormVersion.id,
-            FormVersion.master_form_id,
-            FormVersion.version,
-            FormVersion.is_current,
-            FormVersion.is_published,
-            FormVersion.file_size,
-            FormVersion.created_by,
-            FormVersion.change_summary,
-            FormVersion.created_at
-        ).order_by(FormVersion.created_at.desc()).limit(50)
+        versions_query = (
+            session.query(
+                FormVersion.id,
+                FormVersion.master_form_id,
+                FormVersion.version,
+                FormVersion.is_current,
+                FormVersion.is_published,
+                FormVersion.file_size,
+                FormVersion.created_by,
+                FormVersion.change_summary,
+                FormVersion.created_at,
+            )
+            .order_by(FormVersion.created_at.desc())
+            .limit(50)
+        )
         form_versions = []
         for version in versions_query:
             # Get master form name separately to avoid lazy loading
@@ -600,29 +612,28 @@ async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Se
             if version.master_form_id:
                 master = session.query(MasterForm).filter(MasterForm.id == version.master_form_id).first()
                 master_form_name = master.name if master else f"Form {version.master_form_id}"
-            
-            form_versions.append({
-                "id": version.id,
-                "master_form_id": version.master_form_id,
-                "version": version.version,
-                "is_current": version.is_current,
-                "is_published": version.is_published,
-                "file_size": version.file_size,
-                "created_by": version.created_by,
-                "change_summary": version.change_summary,
-                "created_at": version.created_at.isoformat(),
-                "master_form_name": master_form_name
-            })
+
+            form_versions.append(
+                {
+                    "id": version.id,
+                    "master_form_id": version.master_form_id,
+                    "version": version.version,
+                    "is_current": version.is_current,
+                    "is_published": version.is_published,
+                    "file_size": version.file_size,
+                    "created_by": version.created_by,
+                    "change_summary": version.change_summary,
+                    "created_at": version.created_at.isoformat(),
+                    "master_form_name": master_form_name,
+                }
+            )
         print(f"📋 Found {len(form_versions)} form versions")
-        
+
         # Get user prompts from customization_requests table
         print("🔍 Starting customization requests query...")
         from database_schema import CustomizationRequest
-        requests_query = (
-            session.query(CustomizationRequest)
-            .order_by(CustomizationRequest.created_at.desc())
-            .limit(20)
-        )
+
+        requests_query = session.query(CustomizationRequest).order_by(CustomizationRequest.created_at.desc()).limit(20)
         print("🔍 Customization requests query created, executing...")
         customization_requests = []
         for req in requests_query:
@@ -631,65 +642,78 @@ async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Se
             if req.master_form_id:
                 master = session.query(MasterForm).filter(MasterForm.id == req.master_form_id).first()
                 master_form_name = master.name if master else f"Form {req.master_form_id}"
-            
-            customization_requests.append({
-                "id": req.id,
-                "prompt": req.raw_request,
-                "target_sheet": (req.parsed_requirements or {}).get("target_sheet") if req.parsed_requirements else None,
-                "status": req.status.value if hasattr(req.status, 'value') else req.status,
-                "timestamp": req.created_at.isoformat(),
-                "user_id": req.created_by,
-                "client_name": req.client_name,
-                "form_title": req.form_title,
-                "master_form_id": req.master_form_id,
-                "master_form_name": master_form_name,
-            })
+
+            customization_requests.append(
+                {
+                    "id": req.id,
+                    "prompt": req.raw_request,
+                    "target_sheet": (req.parsed_requirements or {}).get("target_sheet")
+                    if req.parsed_requirements
+                    else None,
+                    "status": req.status.value if hasattr(req.status, "value") else req.status,
+                    "timestamp": req.created_at.isoformat(),
+                    "user_id": req.created_by,
+                    "client_name": req.client_name,
+                    "form_title": req.form_title,
+                    "master_form_id": req.master_form_id,
+                    "master_form_name": master_form_name,
+                }
+            )
         print(f"📋 Found {len(customization_requests)} customization requests (user prompts)")
-        
+
         # Get recent operations (audit log)
         print("🔍 Starting operations query...")
         operations_query = session.query(FormOperation).order_by(FormOperation.started_at.desc()).limit(20)
         recent_operations = []
         print(f"🔧 Found {operations_query.count()} operations")
         for op in operations_query:
-            recent_operations.append({
-                "id": op.id,
-                "operation_id": op.operation_id,
-                "operation_type": (op.operation_type.value if hasattr(op.operation_type, 'value') else op.operation_type),
-                "operation_description": op.operation_description,
-                "target_type": op.target_type,
-                "target_id": op.target_id,
-                "target_name": op.target_name,
-                "user_id": op.user_id,
-                "success": op.success,
-                "error_message": op.error_message,
-                "execution_time_ms": op.execution_time_ms,
-                "started_at": op.started_at.isoformat(),
-                "completed_at": op.completed_at.isoformat() if op.completed_at else None,
-                "username": op.user.username if op.user else f"User {op.user_id}"
-            })
-        
+            recent_operations.append(
+                {
+                    "id": op.id,
+                    "operation_id": op.operation_id,
+                    "operation_type": (
+                        op.operation_type.value if hasattr(op.operation_type, "value") else op.operation_type
+                    ),
+                    "operation_description": op.operation_description,
+                    "target_type": op.target_type,
+                    "target_id": op.target_id,
+                    "target_name": op.target_name,
+                    "user_id": op.user_id,
+                    "success": op.success,
+                    "error_message": op.error_message,
+                    "execution_time_ms": op.execution_time_ms,
+                    "started_at": op.started_at.isoformat(),
+                    "completed_at": op.completed_at.isoformat() if op.completed_at else None,
+                    "username": op.user.username if op.user else f"User {op.user_id}",
+                }
+            )
+
         # Get active sessions
         print("🔍 Starting active sessions query...")
-        sessions_query = session.query(UserSession).filter(
-            UserSession.status == SessionStatus.ACTIVE
-        ).order_by(UserSession.last_activity.desc()).limit(20)
+        sessions_query = (
+            session.query(UserSession)
+            .filter(UserSession.status == SessionStatus.ACTIVE)
+            .order_by(UserSession.last_activity.desc())
+            .limit(20)
+        )
         active_sessions = []
         for sess in sessions_query:
-            active_sessions.append({
-                "id": sess.id,
-                "user_id": sess.user_id,
-                "session_token": sess.session_token[:8] + "...",  # Truncate for security
-                "ip_address": str(sess.ip_address) if sess.ip_address else None,
-                "status": sess.status.value,
-                "expires_at": sess.expires_at.isoformat(),
-                "last_activity": sess.last_activity.isoformat(),
-                "created_at": sess.created_at.isoformat(),
-                "username": sess.user.username if sess.user else f"User {sess.user_id}",
-                "user_role": sess.user.role.value if sess.user else "Unknown"
-            })
+            active_sessions.append(
+                {
+                    "id": sess.id,
+                    "user_id": sess.user_id,
+                    "session_token": sess.session_token[:8] + "...",  # Truncate for security
+                    "ip_address": str(sess.ip_address) if sess.ip_address else None,
+                    "status": sess.status.value,
+                    "expires_at": sess.expires_at.isoformat(),
+                    "last_activity": sess.last_activity.isoformat(),
+                    "created_at": sess.created_at.isoformat(),
+                    "username": sess.user.username if sess.user else f"User {sess.user_id}",
+                    "user_role": sess.user.role.value if sess.user else "Unknown",
+                }
+            )
         print(f"🔍 Found {len(active_sessions)} active sessions")
-        
+
         # Get comprehensive statistics
         from database_schema import get_database_stats
 
@@ -735,17 +759,19 @@ async def get_admin_dashboard(admin_user: User = Depends(get_admin_user), db: Se
 
 # =============== CORE API ENDPOINTS ===============
 
+
 @app.post("/api/admin/master-forms/import")
 async def import_master_form(
     payload: MasterFormUpsertRequest,
     admin_user: User = Depends(get_admin_user),
-    db: Session = Depends(get_database_session)
+    db: Session = Depends(get_database_session),
 ):
     """Admin-only: Create or update a master form record ONLY in master_forms.
     If a master form with the same name exists, updates its metadata and current_version.
     """
     try:
         from database_schema import MasterForm
+
         # Find by name
         master = db.query(MasterForm).filter(MasterForm.name == payload.name).first()
         if not master:
@@ -774,7 +800,7 @@ async def import_master_form(
                 target_id=str(master.id),
                 target_name=payload.name,
                 user_id=admin_user.id,
-                success=True
+                success=True,
             )
             return {"success": True, "action": "created", "master_form_id": master.id}
         else:
@@ -807,7 +833,7 @@ async def import_master_form(
                 target_type="master_form",
                 target_name=payload.name,
                 user_id=admin_user.id,
-                success=True
+                success=True,
             )
             return {"success": True, "action": "updated", "master_form_id": master.id}
     except Exception as e:
@@ -817,13 +843,12 @@ async def import_master_form(
 
 @app.delete("/api/admin/master-forms/{master_form_id}")
 async def delete_master_form(
-    master_form_id: int,
-    admin_user: User = Depends(get_admin_user),
-    db: Session = Depends(get_database_session)
+    master_form_id: int, admin_user: User = Depends(get_admin_user), db: Session = Depends(get_database_session)
 ):
     """Admin-only: Delete a master form and its versions."""
     try:
         from database_schema import MasterForm
+
         master = db.query(MasterForm).filter(MasterForm.id == master_form_id).first()
         if not master:
             raise HTTPException(status_code=404, detail="Master form not found")
@@ -837,7 +862,7 @@ async def delete_master_form(
             target_id=str(master_form_id),
             target_name=name,
             user_id=admin_user.id,
-            success=True
+            success=True,
         )
         return {"success": True}
     except HTTPException:
@@ -848,22 +873,20 @@ async def delete_master_form(
 
 
 @app.post("/api/admin/purge-db")
-async def purge_database(
-    payload: PurgeConfirmRequest,
-    admin_user: User = Depends(get_admin_user)
-):
+async def purge_database(payload: PurgeConfirmRequest, admin_user: User = Depends(get_admin_user)):
     """Admin-only: Drop and recreate all tables. Requires {"confirm": true}."""
     if not payload.confirm:
         raise HTTPException(status_code=400, detail="Confirmation required: set confirm=true")
     try:
         from database_manager import initialize_database
+
         ok = initialize_database(force_recreate=True)
         get_operation_logger().log_operation(
             operation_type=OperationType.DELETE,
             description="Database purged and recreated",
             target_type="database",
             user_id=admin_user.id,
-            success=bool(ok)
+            success=bool(ok),
         )
         if not ok:
             raise HTTPException(status_code=500, detail="Purge failed")
@@ -1110,10 +1133,10 @@ async def ai_edit_endpoint(
         raise HTTPException(status_code=400, detail="No form uploaded. Please upload an XML file first.")
 
     try:
-        # Create LangGraph ReAct Agent
-        # Choose working file: prefer last modified, else original
         working_file = user_form_session.modified_file_path or user_form_session.original_file_path
-        agent = create_proper_xlsform_agent(working_file, base_original_path=user_form_session.original_file_path)
+        original_file = user_form_session.original_file_path
+
+        agent = create_proper_xlsform_agent(working_file, base_original_path=original_file)
 
         # Add target sheet context to prompt if specified
         enhanced_prompt = prompt
@@ -1123,7 +1146,8 @@ async def ai_edit_endpoint(
         # Persist prompt to customization_requests table (initial record)
         customization_request_id = None
         try:
-            from database_schema import MasterForm, CustomizationRequest, RequestStatus
+            from database_schema import CustomizationRequest, MasterForm, RequestStatus
+
             # Derive form context for client_name/form_title
             form_title = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
             client_name = current_user.company or current_user.username or "Unknown"
@@ -1132,6 +1156,7 @@ async def ai_edit_endpoint(
                 # Ensure a MasterForm exists (required by FK)
                 try:
                     from database_manager import get_form_manager
+
                     with open(working_file, "r", encoding="utf-8") as xf:
                         xml_content_for_master = xf.read()
                     timestamp_version = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -1143,7 +1168,7 @@ async def ai_edit_endpoint(
                         form_type="General",
                         equipment_types=[],
                         tags=[],
-                        created_by=current_user.id
+                        created_by=current_user.id,
                     )
                     master = db.query(MasterForm).filter(MasterForm.name == form_title).first()
                 except Exception as ce:
@@ -1218,32 +1243,38 @@ async def ai_edit_endpoint(
         response_lower = result["agent_response"].lower()
         tool_calls_made = int(result.get("tool_calls_made", 0) or 0)
         agent_response = result.get("agent_response", "")
-        
+
         # Check for successful task execution in the response
-        has_successful_tasks = any([
-            '"status": "completed"' in agent_response,
-            '"completed_tasks"' in agent_response,
-            'Successfully completed' in agent_response,
-            '✅' in agent_response,
-            '"execution_completed": true' in agent_response,
-            'Successfully modified' in agent_response,  # Add this pattern
-            'successfully updated' in agent_response.lower(),  # Add this pattern
-        ])
-        
+        has_successful_tasks = any(
+            [
+                '"status": "completed"' in agent_response,
+                '"completed_tasks"' in agent_response,
+                "Successfully completed" in agent_response,
+                "✅" in agent_response,
+                '"execution_completed": true' in agent_response,
+                "Successfully modified" in agent_response,  # Add this pattern
+                "successfully updated" in agent_response.lower(),  # Add this pattern
+            ]
+        )
+
         # Check for failure indicators in the response (be more specific to avoid false positives)
-        has_failure_indicators = any([
-            'could not be completed' in agent_response.lower(),
-            'was not found' in agent_response.lower() and 'not found in' in agent_response.lower(),
-            'error occurred' in agent_response.lower(),
-            'failed to' in agent_response.lower(),
-            'unable to complete' in agent_response.lower(),
-            'execution failed' in agent_response.lower(),
-        ])
-        
+        has_failure_indicators = any(
+            [
+                "could not be completed" in agent_response.lower(),
+                "was not found" in agent_response.lower() and "not found in" in agent_response.lower(),
+                "error occurred" in agent_response.lower(),
+                "failed to" in agent_response.lower(),
+                "unable to complete" in agent_response.lower(),
+                "execution failed" in agent_response.lower(),
+            ]
+        )
+
         # Determine if changes were actually applied
         changes_applied = modified_file_created or (has_successful_tasks and not has_failure_indicators)
-        actual_success = changes_applied and (tool_calls_made > 0 or has_successful_tasks) and not has_failure_indicators
-        
+        actual_success = (
+            changes_applied and (tool_calls_made > 0 or has_successful_tasks) and not has_failure_indicators
+        )
+
         # Debug logging
         print(f"🔍 Success detection debug:")
         print(f"  - modified_file_created: {modified_file_created}")
@@ -1253,18 +1284,20 @@ async def ai_edit_endpoint(
         print(f"  - changes_applied: {changes_applied}")
         print(f"  - actual_success: {actual_success}")
         print(f"  - agent_response preview: {agent_response[:200]}...")
-        
+
         # Update history regardless of success/failure
         history = user_form_session.edit_history_json or []
-        history.append({
-            "timestamp": datetime.now().isoformat(),
-            "prompt": prompt,
-            "target_sheet": target_sheet,
-            "success": actual_success,
-            "changes_applied": changes_applied,
-        })
+        history.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "prompt": prompt,
+                "target_sheet": target_sheet,
+                "success": actual_success,
+                "changes_applied": changes_applied,
+            }
+        )
         user_form_session.edit_history_json = history
-        
+
         # Only proceed with success path if we actually have changes
         if actual_success:
             if latest_modified:
@@ -1286,26 +1319,30 @@ async def ai_edit_endpoint(
 
                 # Read XML content from the appropriate source
                 xml_content = ""
-                
+
                 if latest_modified and os.path.exists(latest_modified):
                     # Use the modified file created by the agent
                     try:
                         with open(latest_modified, "r", encoding="utf-8") as xf:
                             xml_content = xf.read()
-                        print(f"✅ Read modified XML content from file: {len(xml_content)} characters from {latest_modified}")
+                        print(
+                            f"✅ Read modified XML content from file: {len(xml_content)} characters from {latest_modified}"
+                        )
                     except Exception as e:
                         print(f"❌ Failed to read modified file {latest_modified}: {str(e)}")
                         raise HTTPException(status_code=500, detail="Failed to read modified XML content")
                 else:
                     # Check if this is a task-based edit (no file created but changes made)
-                    has_successful_tasks = any([
-                        '"status": "completed"' in result.get("agent_response", ""),
-                        '"completed_tasks"' in result.get("agent_response", ""),
-                        'Successfully completed' in result.get("agent_response", ""),
-                        '✅' in result.get("agent_response", ""),
-                        '"execution_completed": true' in result.get("agent_response", "")
-                    ])
-                    
+                    has_successful_tasks = any(
+                        [
+                            '"status": "completed"' in result.get("agent_response", ""),
+                            '"completed_tasks"' in result.get("agent_response", ""),
+                            "Successfully completed" in result.get("agent_response", ""),
+                            "✅" in result.get("agent_response", ""),
+                            '"execution_completed": true' in result.get("agent_response", ""),
+                        ]
+                    )
+
                     if has_successful_tasks:
                         # For task-based edits, we need to get the XML from the original file
                         # since no physical file was created but changes were made in memory
@@ -1316,7 +1353,9 @@ async def ai_edit_endpoint(
                             print(f"📄 Read XML content from original file: {len(xml_content)} characters")
                         except Exception as e:
                             print(f"❌ Failed to read original file {working_file}: {str(e)}")
-                            raise HTTPException(status_code=500, detail="Failed to read XML content for database storage")
+                            raise HTTPException(
+                                status_code=500, detail="Failed to read XML content for database storage"
+                            )
                     else:
                         # No modifications were made, use original file
                         print(f"🔍 No modifications detected, using original file: {working_file}")
@@ -1326,14 +1365,16 @@ async def ai_edit_endpoint(
                             print(f"📄 Read XML content from original file: {len(xml_content)} characters")
                         except Exception as e:
                             print(f"❌ Failed to read original file {working_file}: {str(e)}")
-                            raise HTTPException(status_code=500, detail="Failed to read XML content for database storage")
-                
+                            raise HTTPException(
+                                status_code=500, detail="Failed to read XML content for database storage"
+                            )
+
                 # Ensure we have XML content
                 if not xml_content or len(xml_content.strip()) == 0:
                     print(f"❌ XML content is empty or whitespace only (length: {len(xml_content)})")
                     print(f"🔍 DEBUG: This means the AI edit did not create any modifications")
                     raise HTTPException(status_code=500, detail="No XML content available to save to database")
-                
+
                 print(f"✅ XML content ready for database storage: {len(xml_content)} characters")
                 print(f"🔍 DEBUG: XML starts with: {xml_content[:100]}...")
 
@@ -1362,7 +1403,11 @@ async def ai_edit_endpoint(
                     version_name = f"{form_name}_{timestamp_version}"
 
                     # Prefer storing file path to avoid large DB payloads
-                    if storage_mode in {"path", "path_only", "file"} and latest_modified and os.path.exists(latest_modified):
+                    if (
+                        storage_mode in {"path", "path_only", "file"}
+                        and latest_modified
+                        and os.path.exists(latest_modified)
+                    ):
                         file_size = os.path.getsize(latest_modified)
                         try:
                             with open(latest_modified, "rb") as fbin:
@@ -1407,9 +1452,11 @@ async def ai_edit_endpoint(
 
                     db.add(new_version)
                     # Batch commit with session updates below
-                    print(f"✅ Prepared version for DB: {version_name} (mode={os.getenv('XML_STORE_MODE', 'compressed')})")
+                    print(
+                        f"✅ Prepared version for DB: {version_name} (mode={os.getenv('XML_STORE_MODE', 'compressed')})"
+                    )
                     print(f"🔍 DEBUG: Prepared XML length: {len(xml_content)}")
-                    
+
                     # Verify what was actually saved (non-critical check)
                     try:
                         saved_version = db.query(FormVersion).filter(FormVersion.id == new_version.id).first()
@@ -1447,9 +1494,12 @@ async def ai_edit_endpoint(
             try:
                 if customization_request_id:
                     from database_schema import CustomizationRequest, RequestStatus
+
                     req = db.query(CustomizationRequest).get(customization_request_id)
                     if req:
-                        req.status = RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
+                        req.status = (
+                            RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
+                        )
                         req.processing_completed_at = datetime.utcnow()
                         db.add(req)
                         db.commit()
@@ -1461,9 +1511,12 @@ async def ai_edit_endpoint(
             try:
                 if customization_request_id:
                     from database_schema import CustomizationRequest, RequestStatus
+
                     req = db.query(CustomizationRequest).get(customization_request_id)
                     if req:
-                        req.status = RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
+                        req.status = (
+                            RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
+                        )
                         req.processing_completed_at = datetime.utcnow()
                         db.add(req)
                         db.commit()
@@ -1474,7 +1527,7 @@ async def ai_edit_endpoint(
             # Log AI edit operation (fixed database transaction issue)
             try:
                 # Use a fresh database session for logging to avoid transaction conflicts
-                from database_manager import get_database_session
+                # from database_manager import get_database_session
                 log_db = next(get_database_session())
                 operation_logger = get_operation_logger()
                 operation_logger.log_operation(
@@ -1489,8 +1542,8 @@ async def ai_edit_endpoint(
                         "tool_calls_made": tool_calls_made,
                         "modified_file": user_form_session.modified_file_path,
                         "changes_applied": modified_file_created,
-                        "customization_request_id": customization_request_id
-                    }
+                        "customization_request_id": customization_request_id,
+                    },
                 )
                 log_db.close()
                 print("✅ Operation logged successfully")
@@ -1512,11 +1565,12 @@ async def ai_edit_endpoint(
         else:
             # AI edit failed - no changes were applied
             db.commit()  # Commit the history update
-            
+
             # Update customization request as failed
             try:
                 if customization_request_id:
                     from database_schema import CustomizationRequest, RequestStatus
+
                     req = db.query(CustomizationRequest).get(customization_request_id)
                     if req:
                         req.status = RequestStatus.REVISION_REQUESTED.value
@@ -1536,16 +1590,22 @@ async def ai_edit_endpoint(
                 user_id=current_user.id,
                 success=False,
                 error_message=result.get("error", "No changes were applied"),
-                after_data={"customization_request_id": customization_request_id}
+                after_data={"customization_request_id": customization_request_id},
             )
-            return {"success": False, "error": result.get("error", "No changes were applied"), "prompt": prompt, "target_sheet": target_sheet}
+            return {
+                "success": False,
+                "error": result.get("error", "No changes were applied"),
+                "prompt": prompt,
+                "target_sheet": target_sheet,
+            }
 
     except Exception as e:
         # Log exception
         # Update customization request as failed (exception path)
         try:
-            if 'customization_request_id' in locals() and customization_request_id:
+            if "customization_request_id" in locals() and customization_request_id:
                 from database_schema import CustomizationRequest, RequestStatus
+
                 req = db.query(CustomizationRequest).get(customization_request_id)
                 if req:
                     req.status = RequestStatus.REVISION_REQUESTED.value
@@ -1565,7 +1625,7 @@ async def ai_edit_endpoint(
             user_id=current_user.id,
             success=False,
             error_message=str(e),
-            after_data={"customization_request_id": customization_request_id}
+            after_data={"customization_request_id": customization_request_id},
         )
         raise HTTPException(status_code=500, detail=f"AI editing error: {str(e)}")
 
@@ -1596,13 +1656,13 @@ async def export_xml(
 
     try:
         # Export using lazy loading: prefer file_path; if not, use DB content and decompress when needed
-        from database_schema import MasterForm, FormVersion
+        from database_schema import FormVersion, MasterForm
 
         original_name = os.path.basename(user_form_session.original_file_path).replace(".xml", "")
         export_filename = f"{original_name}_modified.xml"  # Default filename
         file_type = "modified"
         xml_content: str = None
-        
+
         print(f"🔍 DEBUG: Starting export for user {current_user.id}")
         print(f"🔍 DEBUG: original_name = '{original_name}'")
         print(f"🔍 DEBUG: default export_filename = '{export_filename}'")
@@ -1611,9 +1671,9 @@ async def export_xml(
         master = db.query(MasterForm).filter(MasterForm.name == original_name).first()
         if not master:
             raise HTTPException(status_code=404, detail=f"Master form '{original_name}' not found in database")
-        
+
         print(f"🔍 Found master form: {master.name} (ID: {master.id})")
-        
+
         # Get latest version created by current user
         version = (
             db.query(FormVersion)
@@ -1622,11 +1682,11 @@ async def export_xml(
             .order_by(FormVersion.created_at.desc())
             .first()
         )
-        
+
         if not version:
             print(f"❌ DEBUG: No version found for user {current_user.id}, master_form_id {master.id}")
             raise HTTPException(status_code=404, detail="No edited version found. Please run AI Edit first.")
-        
+
         # Determine content source
         xml_content: Optional[str] = None
         if version.file_path and os.path.exists(version.file_path):
@@ -1637,29 +1697,34 @@ async def export_xml(
                 file_type = "modified_file"
             except Exception as fe:
                 print(f"⚠️ Failed reading file_path; will attempt DB content: {fe}")
-        
+
         if xml_content is None:
             if not version.xml_content:
                 print(f"❌ DEBUG: Version found but no XML content or file path")
                 raise HTTPException(status_code=404, detail="No XML content available in the edited version")
             # Decompress if flagged
-            xml_content = decompress_xml_from_base64(version.xml_content) if getattr(version, 'xml_compressed', False) else version.xml_content
+            xml_content = (
+                decompress_xml_from_base64(version.xml_content)
+                if getattr(version, "xml_compressed", False)
+                else version.xml_content
+            )
             print(f"✅ Exporting from DB content (compressed={getattr(version, 'xml_compressed', False)})")
             file_type = "database"
 
         print(f"✅ Export source resolved for version {version.version} (created: {version.created_at})")
         print(f"🔍 DEBUG: original_name = '{original_name}'")
         print(f"🔍 DEBUG: version.version = '{version.version}'")
-        
+
         # Use the same naming logic as the status endpoint for consistency
-        export_filename = f"{original_name}_{version.version}.xml"
+        export_filename = f"{version.version}.xml"
         print(f"🔍 DEBUG: UPDATED export_filename = '{export_filename}'")
-        
+
         # URL encode the filename to handle special characters
         import urllib.parse
+
         encoded_filename = urllib.parse.quote(export_filename)
         print(f"🔍 DEBUG: encoded_filename = '{encoded_filename}'")
-        
+
         # Return DB content as file download
         print(f"📄 Serving XML: {len(xml_content)} characters, filename: {export_filename}")
         from fastapi.responses import Response
@@ -1673,7 +1738,7 @@ async def export_xml(
             target_name=export_filename,
             user_id=current_user.id,
             success=True,
-            after_data={"file_type": file_type, "has_modifications": True, "source": "database"}
+            after_data={"file_type": file_type, "has_modifications": True, "source": "database"},
         )
 
         # Reset ALL active user form sessions after successful export
@@ -1682,7 +1747,9 @@ async def export_xml(
 
             active_sessions = (
                 db.query(UserFormSession)
-                .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+                .filter(
+                    UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value
+                )
                 .all()
             )
             reset_count = 0
@@ -1702,8 +1769,10 @@ async def export_xml(
             db.rollback()
 
         print(f"🔍 DEBUG: FINAL export_filename being sent = '{export_filename}'")
-        print(f"🔍 DEBUG: FINAL Content-Disposition = 'attachment; filename=\"{export_filename}\"; filename*=UTF-8''{encoded_filename}'")
-        
+        print(
+            f"🔍 DEBUG: FINAL Content-Disposition = 'attachment; filename=\"{export_filename}\"; filename*=UTF-8''{encoded_filename}'"
+        )
+
         return Response(
             content=xml_content,
             media_type="application/xml",
@@ -1713,7 +1782,7 @@ async def export_xml(
                 "X-Has-Modifications": "true",
                 "X-Exported-By": current_user.username,
                 "X-Version": version.version,
-                "X-Created-At": version.created_at.isoformat()
+                "X-Created-At": version.created_at.isoformat(),
             },
         )
 
@@ -1818,10 +1887,10 @@ async def get_status(
         # Fallback to file path if no DB version
         if not modified_file_display:
             modified_file_display = ufs.modified_file_path
-    
+
     # Count only successful edits (same logic as AI edit endpoint)
     successful_edits = [edit for edit in history if edit.get("success", False)]
-    
+
     return {
         "has_file_uploaded": True,
         "original_file": ufs.original_file_path,
