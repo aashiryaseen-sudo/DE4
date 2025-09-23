@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -422,7 +422,7 @@ async def logout_user(
                     if user_session:
                         user_id_for_log = user_session.user_id  # Get the ID before committing
                         user_session.status = SessionStatus.TERMINATED
-                        user_session.terminated_at = datetime.utcnow()
+                        user_session.terminated_at = datetime.now(timezone.utc)
                         session.commit()
                         terminated = True
             except Exception:
@@ -1380,7 +1380,7 @@ async def ai_edit_endpoint(
 
                 # Find or create master form
                 master_form = db.query(MasterForm).filter(MasterForm.name == form_name).first()
-                timestamp_version = datetime.utcnow().strftime("%Y%m%d_%H%M%S")  # Full timestamp: YYYYMMDD_HHMMSS
+                timestamp_version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")  # Full timestamp: YYYYMMDD_HHMMSS
 
                 if not master_form:
                     # Restore previous behavior: create master form record when missing
@@ -1457,18 +1457,6 @@ async def ai_edit_endpoint(
                     )
                     print(f"🔍 DEBUG: Prepared XML length: {len(xml_content)}")
 
-                    # Verify what was actually saved (non-critical check)
-                    try:
-                        saved_version = db.query(FormVersion).filter(FormVersion.id == new_version.id).first()
-                        if saved_version:
-                            saved_xml_len = len(saved_version.xml_content) if saved_version.xml_content else 0
-                            print(f"🔍 DEBUG: Verified saved XML length: {saved_xml_len}")
-                            if saved_xml_len == 0:
-                                print(f"❌ WARNING: XML content was not saved properly!")
-                        else:
-                            print(f"❌ ERROR: Could not retrieve saved version from DB")
-                    except Exception as verify_e:
-                        print(f"⚠️ Verification failed (non-critical): {verify_e}")
 
                 # Finally commit session changes and new version together
                 # Commit includes: user_form_session.modified_file_path/history and new version
@@ -1500,7 +1488,7 @@ async def ai_edit_endpoint(
                         req.status = (
                             RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
                         )
-                        req.processing_completed_at = datetime.utcnow()
+                        req.processing_completed_at = datetime.now(timezone.utc)
                         db.add(req)
                         db.commit()
             except Exception as e:
@@ -1512,12 +1500,12 @@ async def ai_edit_endpoint(
                 if customization_request_id:
                     from database_schema import CustomizationRequest, RequestStatus
 
-                    req = db.query(CustomizationRequest).get(customization_request_id)
+                    req = db.get(CustomizationRequest, customization_request_id)
                     if req:
                         req.status = (
                             RequestStatus.APPROVED.value if actual_success else RequestStatus.REVISION_REQUESTED.value
                         )
-                        req.processing_completed_at = datetime.utcnow()
+                        req.processing_completed_at = datetime.now(timezone.utc)
                         db.add(req)
                         db.commit()
             except Exception as e:
@@ -1571,10 +1559,10 @@ async def ai_edit_endpoint(
                 if customization_request_id:
                     from database_schema import CustomizationRequest, RequestStatus
 
-                    req = db.query(CustomizationRequest).get(customization_request_id)
+                    req = db.get(CustomizationRequest, customization_request_id)
                     if req:
                         req.status = RequestStatus.REVISION_REQUESTED.value
-                        req.processing_completed_at = datetime.utcnow()
+                        req.processing_completed_at = datetime.now(timezone.utc)
                         db.add(req)
                         db.commit()
             except Exception as e2:
@@ -1606,10 +1594,10 @@ async def ai_edit_endpoint(
             if "customization_request_id" in locals() and customization_request_id:
                 from database_schema import CustomizationRequest, RequestStatus
 
-                req = db.query(CustomizationRequest).get(customization_request_id)
+                req = db.get(CustomizationRequest, customization_request_id)
                 if req:
                     req.status = RequestStatus.REVISION_REQUESTED.value
-                    req.processing_completed_at = datetime.utcnow()
+                    req.processing_completed_at = datetime.now(timezone.utc)
                     db.add(req)
                     db.commit()
         except Exception as e2:
