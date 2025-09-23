@@ -267,53 +267,80 @@ class XLSFormXMLEditor:
         return {"success": ok, "worksheet": target_ws, "headers": target_headers}
 
     def add_choice_option(self, list_name: str, label: str, name: str, worksheet_name: str = None) -> bool:
-        """Add a new choice option to select_one or select_multiple lists"""
+        """
+        Adds a new choice option. By default, it searches ONLY in 'select_one' and 'select_multiple' sheets.
+        It will add the choice to any of those sheets where the list_name is found.
+        """
         try:
-            # Determine which worksheet(s) to use
-            if worksheet_name is None:
-                worksheets_to_try = self.detect_choice_worksheets()
-            else:
+            was_added_somewhere = False
+
+            if worksheet_name is not None:
                 worksheets_to_try = [worksheet_name]
+            else:
+                worksheets_to_try = ["select_one", "select_multiple"]
 
             for ws_name in worksheets_to_try:
+                print(f"checking in {ws_name}")
                 worksheet = self.find_worksheet(ws_name)
-                if not worksheet:
+                if worksheet is None:
                     continue
 
                 table = self.find_table_in_worksheet(worksheet)
-                if not table:
+                if table is None:
                     continue
 
-                # Get headers to understand the structure
                 headers = self.get_headers(table)
-                if len(headers) < 3:  # Need at least list_name, name, label columns
+                lower_headers = [h.lower().strip() for h in headers]
+
+                # --- NEW LOGIC: Check if the list_name exists in this sheet before adding ---
+                try:
+                    # Find the column index for 'list name'
+                    list_name_col_index = lower_headers.index("list name")
+                except ValueError:
+                    # This sheet doesn't have a 'list name' column, so skip it.
                     continue
 
-                print(f"🔍 Headers in {ws_name}: {headers}")
+                list_exists_in_sheet = False
+                # Scan all data rows to see if our target list_name is in this sheet
+                for row in table.findall(".//ss:Row", self.namespaces)[1:]:  # Skip header
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+                    # This check handles sparse XML where cells might not be in order
+                    current_idx = 0
+                    for cell in cells:
+                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                        if index_attr:
+                            current_idx = int(index_attr) - 1
 
-                # Create new choice row based on actual header structure
-                # Common XLSForm structures:
-                # ['label', 'name', 'list name', 'order'] - most common
-                # ['list_name', 'name', 'label'] - alternative
+                        if current_idx == list_name_col_index:
+                            data_elem = cell.find(".//ss:Data", self.namespaces)
+                            if data_elem is not None and data_elem.text == list_name:
+                                list_exists_in_sheet = True
+                                print(f"Found list '{list_name}' in worksheet '{ws_name}'")
+                                break  # Found it
+                        current_idx += 1
+                    if list_exists_in_sheet:
+                        break  # Found it
 
-                if len(headers) >= 4 and "list name" in [h.lower() for h in headers]:
-                    # Standard XLSForm structure: [label, name, list_name, order]
-                    choice_row_data = [label, name, list_name, ""]  # Empty order
-                    print(f"Using standard XLSForm structure: {choice_row_data}")
-                elif len(headers) >= 3:
-                    # Fallback structure: [list_name, name, label]
-                    choice_row_data = [list_name, name, label]
-                    print(f"Using fallback structure: {choice_row_data}")
+                # If the target list isn't in this sheet, move on to the next sheet.
+                if not list_exists_in_sheet:
+                    continue
+                # --- END NEW LOGIC ---
+
+                choice_row_data = []
+                if "label" in lower_headers and "name" in lower_headers and "list name" in lower_headers:
+                    row_map = {header: "" for header in lower_headers}
+                    row_map["label"] = label
+                    row_map["name"] = name
+                    row_map["list name"] = list_name
+                    choice_row_data = [row_map[h.lower().strip()] for h in headers]
                 else:
-                    print(f"❌ Insufficient headers in {ws_name}: {headers}")
                     continue
 
-                # Add the new choice option
                 if self.add_row(ws_name, choice_row_data):
-                    print(f"Added choice option '{label}' to list '{list_name}' in worksheet '{ws_name}'")
-                    return True
+                    print(f"✅ Added choice option '{label}' to list '{list_name}' in worksheet '{ws_name}'")
+                    was_added_somewhere = True
 
-            return False
+            return was_added_somewhere
 
         except Exception as e:
             print(f"Error adding choice option: {str(e)}")
@@ -419,14 +446,6 @@ class XLSFormXMLEditor:
         """
         added = 0
         failures: List[Dict[str, str]] = []
-        # choose worksheet once using detection for consistency
-        target_ws = None
-        if worksheet_name is None:
-            candidates = self.detect_choice_worksheets()
-            if candidates:
-                target_ws = candidates[0]
-        else:
-            target_ws = worksheet_name
 
         for item in items:
             lab = str(item.get("label", "")).strip()
@@ -434,11 +453,14 @@ class XLSFormXMLEditor:
             if not lab:
                 failures.append({"label": lab, "name": nm, "reason": "missing label"})
                 continue
-            ok = self.add_choice_option(list_name=list_name, label=lab, name=nm, worksheet_name=target_ws)
+
+            ok = self.add_choice_option(list_name=list_name, label=lab, name=nm, worksheet_name=None)
+
             if ok:
                 added += 1
             else:
                 failures.append({"label": lab, "name": nm, "reason": "insert failed"})
+
         return {"added": added, "failed": failures, "modified": self.modified}
 
     def modify_cell(self, worksheet_name: str, row_index: int, column_index: int, new_value: str) -> bool:

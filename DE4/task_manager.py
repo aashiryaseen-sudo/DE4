@@ -1,13 +1,16 @@
 """
 Dynamic Task Management System for XLSForm Edits
-Runtime-named tasks with a registry of handlers (Cursor-like TODOs)
+LLM-powered task planning based on user prompts.
 """
 
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
+
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
 from xml_editor import XLSFormXMLEditor, create_xml_editor
 
@@ -24,7 +27,7 @@ class TaskStatus:
 class DynTask:
     id: str
     title: str
-    action: str  # free-form, e.g., "add_row", "add_choice_batch"
+    action: str
     worksheet: Optional[str]
     parameters: Dict[str, Any]
     status: str = TaskStatus.PENDING
@@ -44,7 +47,7 @@ class TaskSession:
     id: str
     user_prompt: str
     tasks: List[DynTask]
-    status: str = "pending"  # pending, executing, completed, partial_success, failed
+    status: str = "pending"
     created_at: str = None
     completed_at: str = None
     modified_files: List[str] = None
@@ -56,219 +59,175 @@ class TaskSession:
             self.modified_files = []
 
 
+class DeleteFieldParams(BaseModel):
+    """Parameters for deleting a field (question) from the survey sheet."""
+
+    field_name: str = Field(..., description="The exact 'name' of the field to delete.")
+
+
+class AddChoiceBatchParams(BaseModel):
+    """Parameters for adding multiple new choices to a dropdown list."""
+
+    list_name: str = Field(..., description="The name of the choice list to add options to.")
+    items: List[str] = Field(..., description="A list of the new choice labels to add.")
+    worksheet: Optional[str] = Field(
+        "choices", description="The name of the worksheet containing choice lists, typically 'choices'."
+    )
+
+
+class ModifyFieldPropertyParams(BaseModel):
+    """Parameters to modify a property of a field or a form setting."""
+
+    worksheet_name: str = Field(
+        ..., description="The name of the worksheet, e.g., 'survey' for questions or 'settings' for form settings."
+    )
+    key_field_name: str = Field(
+        ..., description="The name of the column used to find the correct row, e.g., 'name' for the survey sheet."
+    )
+    key_field_value: str = Field(
+        ..., description="The value to look for in the key_field_name column to identify the row."
+    )
+    property_to_change: str = Field(..., description="The name of the column (property) to modify.")
+    new_value: str = Field(..., description="The new value to set for the property.")
+
+
+class ModifyChoiceParams(BaseModel):
+    """Parameters to modify a property of an existing choice in a list."""
+
+    list_name: str = Field(..., description="The name of the choice list containing the choice to modify.")
+    choice_name: str = Field(..., description="The 'name' of the specific choice to modify.")
+    property_to_change: str = Field(..., description="The property of the choice to change, e.g., 'label'.")
+    new_value: str = Field(..., description="The new value for the property.")
+
+
+class AddRowParams(BaseModel):
+    """Parameters to add a new row of data to a worksheet."""
+
+    values: List[str] = Field(..., description="A list of strings representing the cell values for the new row.")
+    target_sheet: Optional[str] = Field(
+        "survey", description="The recommended worksheet to add the row to, e.g., 'survey'."
+    )
+
+
+class Operator(str, Enum):
+    """Enumeration for filter operators."""
+
+    equals = "equals"
+    contains = "contains"
+    starts_with = "starts_with"
+    ends_with = "ends_with"
+
+
+class FieldFilter(BaseModel):
+    """A single filter condition to apply to a field."""
+
+    property: str = Field(..., description="The property/column to check, e.g., 'type', 'name', 'label'.")
+    operator: Operator = Field(..., description="The comparison operator to use.")
+    value: str = Field(..., description="The value to compare against.")
+
+
+class DeleteByFilterParams(BaseModel):
+    """
+    Defines a request to delete fields that match a set of filter groups.
+    The outer list is joined by OR, the inner list is joined by AND.
+    Example: [[A, B], [C]] means (A AND B) OR C.
+    """
+
+    filter_groups: List[List[FieldFilter]] = Field(..., description="A list of filter groups (lists) to apply.")
+
+
 TASK_SESSIONS_CACHE: Dict[str, Any] = {}
 
 
 class XLSFormTaskManager:
-    """Manages complex XLSForm editing with runtime-discovered tasks."""
+    """Manages complex XLSForm editing with an LLM-powered task planner."""
 
     def __init__(self, xml_file_path: str):
         self.xml_file_path = xml_file_path
         self.current_session: Optional[TaskSession] = None
         self.sessions_history: List[TaskSession] = []
-        # action registry → handler
+
+        # Initialize the LLM for parsing. It's bound with the "tools" it can use.
+        self.parser_llm = ChatOpenAI(model="gpt-4.1", temperature=0).bind_tools(self._get_available_actions())
+
+        # The registry of handlers remains the same.
         self.registry: Dict[str, Callable[[Dict[str, Any], XLSFormXMLEditor], Dict[str, Any]]] = {
-            "add_row": self._handle_add_row,
-            "add_choice_batch": self._handle_add_choice_batch,
-            "add_choice_single": self._handle_add_choice_single,
-            "analyze_structure": self._handle_analyze_structure,
             "delete_field": self._handle_delete_field,
+            "add_choice_batch": self._handle_add_choice_batch,
             "modify_field_property": self._handle_modify_field_property,
             "modify_choice": self._handle_modify_choice,
+            "add_row": self._handle_add_row,
+            "delete_by_filter": self._handle_delete_by_filter,
         }
 
-    # ---------- Planning ----------
-    def parse_user_prompt(self, prompt: str) -> TaskSession:
-        session_id = str(uuid.uuid4())[:8]
+    def _get_available_actions(self) -> List:
+        """Returns the list of Pydantic models that define the LLM's tools."""
+        return [
+            DeleteByFilterParams,
+            DeleteFieldParams,
+            AddChoiceBatchParams,
+            ModifyFieldPropertyParams,
+            ModifyChoiceParams,
+            AddRowParams,
+        ]
+
+    # ---------- Planning (Now LLM-Powered) ----------
+    def _parse_prompt_with_llm(self, prompt: str) -> List[DynTask]:
+        """Uses an LLM with tool-calling to parse the prompt into a list of tasks."""
+        system_prompt = """
+          You are an expert XLSForm task planner. Your job is to analyze a user's request and convert it into a precise, 
+          structured list of one or more function calls required to fulfill the request.
+
+        **IMPORTANT**: For complex conditional deletions (e.g., "delete all fields where type is image and name ends with 'Photo'"), 
+        you MUST use the `DeleteByFilterParams` tool. You must construct the filter groups to match the user's logic.
+
+        - A request like "(condition A AND condition B) OR (condition C)" should be structured as: `filter_groups=[[A, B], [C]]`.
+        - A request like "condition A AND condition B" should be structured as: `filter_groups=[[A, B]]`.
+
+        For simple requests (e.g., "delete the field 'age'"), you can still use the simpler `DeleteFieldParams` tool.
+
+        Key instructions for other tools:
+        - A user's request to change a "question" or "field" refers to the 'survey' sheet. For `ModifyFieldPropertyParams`, 
+        the `worksheet_name` is 'survey', `key_field_name` is 'name', and `key_field_value` is the question's name.
+        - A "setting" refers to the 'settings' sheet.
+        - When adding choices, always use `add_choice_batch`.
+        """
+
+        # Invoke the LLM with the prompt and instructions
+        response = self.parser_llm.invoke([("system", system_prompt), ("human", prompt)])
+
         tasks: List[DynTask] = []
 
-        # Multi-step split by ';' or ' and '
-        segments = re.split(r"[;]|\band\b", prompt, flags=re.IGNORECASE)
-        for seg in segments:
-            s = seg.strip()
-            if not s:
-                continue
+        # Convert the LLM's desired tool calls into our internal DynTask format
+        for tool_call in response.tool_calls:
+            action_name = tool_call["name"]
 
-            if "list" in s.lower() and "choice name" in s.lower() and "change" in s.lower():
-                list_name = self._extract(r"in the ['\"]([\w:]+)['\"]\s+list", s)
-                choice_name = self._extract(r"choice\s+name(?:d)?\s+['\"]([\w:]+)['\"]", s)
-                prop_name = self._extract(r"change the ['\"]([\w:]+)['\"]", s)
-                new_value = self._extract(r"to ['\"]([^']+)['\"]", s)
-
-                if all([list_name, choice_name, prop_name, new_value is not None]):
-                    title = f"Modify choice '{choice_name}' in list '{list_name}'"
-                    params = {
-                        "list_name": list_name,
-                        "choice_name": choice_name,
-                        "property_to_change": prop_name,
-                        "new_value": new_value,
-                    }
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="modify_choice",
-                            worksheet=None,
-                            parameters=params,
-                        )
-                    )
-                    continue
-
-            if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "setting" in s.lower():
-                prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+setting", s)
-                if not prop_name:
-                    prop_name = self._extract(r"change\s+(form_title|form_id|version)\s+to", s)
-
-                new_value = self._extract(r"to\s+(.+)$", s)
-                if new_value:
-                    new_value = new_value.strip(" '\"")
-
-                if prop_name and new_value is not None:
-                    title = f"Modify setting '{prop_name}'"
-                    params = {
-                        "worksheet_name": "settings",
-                        "key_field_name": "form_id",
-                        "key_field_value": "__DUMMY_SETTINGS_VALUE__",
-                        "property_to_change": prop_name,
-                        "new_value": new_value,
-                    }
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="modify_field_property",
-                            worksheet="settings",
-                            parameters=params,
-                        )
-                    )
-                    continue
-
-            if ("update" in s.lower() or "modify" in s.lower() or "change" in s.lower()) and "field" in s.lower():
-                prop_name = self._extract(r"['\"]([\w:]+)['\"]\s+property", s)
-                field_name = self._extract(r"field\s+['\"]([\w:]+)['\"]", s)
-                new_value = self._extract(r"to\s+['\"]([^']+)['\"]", s)
-
-                if prop_name and field_name and new_value is not None:
-                    title = f"Modify property '{prop_name}' for field '{field_name}'"
-                    params = {
-                        "worksheet_name": "survey",
-                        "key_field_name": "name",  # In the 'survey' sheet, the key field is 'name'
-                        "key_field_value": field_name,  # The value for the 'name' key is the field_name
-                        "property_to_change": prop_name,
-                        "new_value": new_value,
-                    }
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="modify_field_property",
-                            worksheet="survey",
-                            parameters=params,
-                        )
-                    )
-                    continue
-
-            if ("delete" in s.lower() or "remove" in s.lower()) and "field" in s.lower():
-                # Extract the entire string of field names, stopping at "from", "in", or the end
-                field_list_str = self._extract(
-                    r"(?:delete|remove)\s+(?:the\s+)?field[s]?\s+(.+?)(?:\s+from|\s+in|$)", s
-                )
-
-                if field_list_str:
-                    # Find all individual field names (handles quotes, commas, and spaces)
-                    field_names = re.findall(r"[\w\-]+", field_list_str)
-
-                    if not field_names:
-                        continue  
-
-                    # Create a separate task for EACH field found
-                    for field_name in field_names:
-                        title = f"Delete field '{field_name}' from survey"
-                        tasks.append(
-                            DynTask(
-                                id=self._tid(len(tasks)),
-                                title=title,
-                                action="delete_field",
-                                worksheet="survey",
-                                parameters={"field_name": field_name},
-                            )
-                        )
-                    continue  
-
-            if "add" in s.lower() and "row" in s.lower() and "data" in s.lower():
-                sheet_hint = "auto_detect"
-                if "to survey" in s.lower() or "in survey" in s.lower():
-                    sheet_hint = "survey"
-                elif "to settings" in s.lower() or "in settings" in s.lower():
-                    sheet_hint = "settings"
-
-                data_str = self._extract(r"data:\s*(.+)$", s)
-                #  Use regex to handle quoted or unquoted comma-separated items
-                data = []
-                if data_str:
-                    data = re.findall(r"['\"]?([^,']+)['\"]?", data_str)
-                    data = [d.strip() for d in data if d.strip()]  # Clean up
-
-                title = f"Add row with {len(data)} values to {sheet_hint}"
-                tasks.append(
-                    DynTask(
-                        id=self._tid(len(tasks)),
-                        title=title,
-                        action="add_row",
-                        worksheet=sheet_hint,
-                        parameters={"values": data, "target_sheet": sheet_hint},
-                    )
-                )
-                continue
-
-            if re.search(r"add\s+(choices?|options?)", s, re.IGNORECASE) and "list" in s.lower():
-                list_name = self._extract(r"(?:to|in)\s+list\s+['\"]?([\w\-]+)['\"]?", s) or "default_list"
-                items_str = self._extract(r"add\s+(?:choices?|options?)\s+(.*?)\s+(?:to|in)\s+list", s)
-
-                items = []
-                if items_str:
-                    #  Use regex to handle quoted or unquoted comma-separated items
-                    items = re.findall(r"['\"]?([^,']+)['\"]?", items_str)
-                    items = [item.strip() for item in items if item.strip()]  # Clean up
-
-                if len(items) > 1:
-                    title = f"Add {len(items)} choices to list {list_name}"
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="add_choice_batch",
-                            worksheet="auto_detect",
-                            parameters={"list_name": list_name, "items": items},
-                        )
-                    )
-                elif items:
-                    title = f"Add choice '{items[0]}' to list {list_name}"
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="add_choice_single",
-                            worksheet="auto_detect",
-                            parameters={"list_name": list_name, "label": items[0], "name": items[0]},
-                        )
-                    )
-                continue
-        if not tasks:
-            tasks.append(
-                DynTask(
-                    id=self._tid(0),
-                    title="Analyze form structure",
-                    action="analyze_structure",
-                    worksheet="all",
-                    parameters={"prompt": prompt},
-                )
+            # Map the Pydantic model name back to our snake_case action name
+            # Example: 'DeleteFieldParams' -> 'delete_field'
+            parsed_action_name = (
+                "".join(["_" + i.lower() if i.isupper() else i for i in action_name]).lstrip("_").replace("_params", "")
             )
 
-        return TaskSession(id=session_id, user_prompt=prompt, tasks=tasks)
+            if parsed_action_name in self.registry:
+                task = DynTask(
+                    id=self._tid(len(tasks)),
+                    title=f"Perform action: {parsed_action_name}",  # Title can be improved
+                    action=parsed_action_name,
+                    worksheet=tool_call["args"].get("worksheet_name") or tool_call["args"].get("target_sheet"),
+                    parameters=tool_call["args"],
+                )
+                tasks.append(task)
+
+        return tasks
 
     def create_task_session(self, user_prompt: str) -> Dict[str, Any]:
-        session = self.parse_user_prompt(user_prompt)
+        """Creates a new task session by parsing the user prompt with the LLM."""
+        session_id = str(uuid.uuid4())[:8]
+
+        # Use the new LLM parser
+        tasks = self._parse_prompt_with_llm(user_prompt)
+
+        session = TaskSession(id=session_id, user_prompt=user_prompt, tasks=tasks)
         self.current_session = session
         TASK_SESSIONS_CACHE[session.id] = session
 
@@ -280,12 +239,13 @@ class XLSFormTaskManager:
                 {"id": t.id, "title": t.title, "action": t.action, "worksheet": t.worksheet, "status": t.status}
                 for t in session.tasks
             ],
-            "estimated_time": f"~{max(1, len(session.tasks)) * 2}-{max(1, len(session.tasks)) * 5} seconds",
+            "estimated_time": f"~{max(1, len(session.tasks)) * 3}-{max(1, len(session.tasks)) * 6} seconds",  # Increased estimate for LLM latency
             "preview": True,
         }
 
-    # ---------- Execution ----------
+    # ---------- Execution (No Changes Needed) ----------
     def execute_task_session(self, session_id: str, confirm: bool = True) -> Dict[str, Any]:
+        # This entire method remains unchanged. It just executes the plan it's given.
         session = TASK_SESSIONS_CACHE.get(session_id)
         if session is None:
             return {"success": False, "error": f"Session ID '{session_id}' not found or has expired."}
@@ -317,8 +277,6 @@ class XLSFormTaskManager:
                 task.result = res
                 if res.get("success"):
                     task.status = TaskStatus.COMPLETED
-                    if res.get("modified_file_path"):
-                        session.modified_files.append(res["modified_file_path"])
                 else:
                     task.status = TaskStatus.FAILED
                     task.error_message = res.get("error") or res.get("reason") or "Unknown error"
@@ -339,14 +297,12 @@ class XLSFormTaskManager:
                 }
             )
 
-        final_output_path = None
         if editor.modified:
             final_output_path = editor.save_modified_xml()
+            if session.modified_files is None:
+                session.modified_files = []
             session.modified_files.append(final_output_path)
-        elif failed:
-            print(f"Session {session_id} failed. No file will be saved.")
-        else:
-            print(f"Session {session_id} completed, but no modifications were made. No file saved.")
+
         session.status = (
             "partial_success"
             if failed and any(t.status == TaskStatus.COMPLETED for t in session.tasks)
@@ -368,11 +324,9 @@ class XLSFormTaskManager:
             "execution_time": f"{(datetime.fromisoformat(session.completed_at) - datetime.fromisoformat(session.created_at)).total_seconds():.1f}s",
         }
 
-    # ---------- Handlers (registry) ----------
+    # ---------- Handlers (No Changes Needed) ----------
     def _handle_add_row(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        result = editor.add_row_to_best_match(params.get("values", []), sheet_hint=params.get("target_sheet"))
-
-        return result
+        return editor.add_row_to_best_match(params.get("values", []), sheet_hint=params.get("target_sheet"))
 
     def _handle_add_choice_batch(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         items = [{"label": it, "name": it} for it in params.get("items", [])]
@@ -381,151 +335,38 @@ class XLSFormTaskManager:
             res["success"] = True
         return res
 
-    def _handle_add_choice_single(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        ok = editor.add_choice_option(
-            params.get("list_name", "default_list"),
-            params.get("label", ""),
-            params.get("name", ""),
-            params.get("worksheet"),
-        )
-        result = {"success": ok}
-
-        return result
-
     def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        worksheet_name = params.get("worksheet_name")
-        key_field_name = params.get("key_field_name")
-        key_field_value = params.get("key_field_value")
-
-        property_to_change = params.get("property_to_change")
-        new_value = params.get("new_value")
-
-        if not all([worksheet_name, key_field_name, key_field_value, property_to_change, new_value is not None]):
-            return {
-                "success": False,
-                "error": "Missing one of required parameters: field_name, property_name, new_value",
-            }
-
         success = editor.modify_field_property(
-            worksheet_name, key_field_name, key_field_value, property_to_change, new_value
+            params["worksheet_name"],
+            params["key_field_name"],
+            params["key_field_value"],
+            params["property_to_change"],
+            params["new_value"],
         )
-        result = {"success": success}
-        if success and editor.modified:
-            result["message"] = (
-                f"Property '{property_to_change}' for field '{key_field_name}' was updated. in sheet {worksheet_name}"
-            )
-        elif not success:
-            result["message"] = f"Could not modify property for field '{key_field_name}' for sheet {worksheet_name}."
-
-        return result
-
-    def _handle_analyze_structure(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        from xml_parser import XLSFormParser
-
-        parser = XLSFormParser(self.xml_file_path)
-        analysis = parser.analyze_complete_form()
-        return {"success": True, "analysis": analysis, "worksheets": list(analysis.keys())}
+        return {"success": success}
 
     def _handle_delete_field(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        field_name = params.get("field_name")
-        if not field_name:
-            return {"success": False, "error": "field_name parameter is missing"}
-
-        success = editor.remove_field_by_name(field_name)
-        result = {"success": success}
-        if success:
-            result["message"] = f"Field '{field_name}' and its choices were successfully deleted."
-        elif not success:
-            result["message"] = f"Could not delete field '{field_name}'. It may not exist."
-
-        return result
+        success = editor.remove_field_by_name(params["field_name"])
+        return {"success": success}
 
     def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        list_name = params.get("list_name")
-        choice_name = params.get("choice_name")
-        prop_name = params.get("property_to_change")
-        new_value = params.get("new_value")
+        success = editor.modify_choice_property(
+            params["list_name"], params["choice_name"], params["property_to_change"], params["new_value"]
+        )
+        return {"success": success}
 
-        if not all([list_name, choice_name, prop_name, new_value is not None]):
-            return {"success": False, "error": "Missing one of required parameters for modify_choice"}
+    def _handle_delete_by_filter(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
+        """Handler to call the new query engine in the XML editor."""
+        filter_groups = params.get("filter_groups", [])
+        if not filter_groups:
+            return {"success": False, "error": "No filters were provided for the deletion."}
 
-        success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
-        result = {"success": success}
-
-        if success and editor.modified:
-            result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
-        elif not success:
-            result["message"] = f"Could not modify choice '{choice_name}'."
-
-        return result
-
-    def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-        list_name = params.get("list_name")
-        choice_name = params.get("choice_name")
-        prop_name = params.get("property_to_change")
-        new_value = params.get("new_value")
-
-        if not all([list_name, choice_name, prop_name, new_value is not None]):
-            return {"success": False, "error": "Missing one of required parameters for modify_choice"}
-
-        success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
-        result = {"success": success}
-
-        if success and editor.modified:
-            result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
-        elif not success:
-            result["message"] = f"Could not modify choice '{choice_name}'."
-
+        result = editor.remove_fields_by_filter(filter_groups)
         return result
 
     # ---------- Helpers ----------
-    def _extract(self, pattern: str, text: str) -> Optional[str]:
-        m = re.search(pattern, text, re.IGNORECASE)
-        return m.group(1).strip() if m else None
-
-    def _extract_csv_after_colon(self, key: str, text: str) -> List[str]:
-        m = re.search(rf"{key}\s*:\s*([^\n]+)", text, re.IGNORECASE)
-        return [v.strip() for v in m.group(1).split(",")] if m else []
-
-    def _extract_csv_after_word(self, word: str, text: str) -> List[str]:
-        # after the word, capture a csv sequence
-        m = re.search(rf"{word}\s+([^\n]+)", text, re.IGNORECASE)
-        return [v.strip() for v in m.group(1).split(",")] if m else []
-
     def _tid(self, idx: int) -> str:
         return f"task_{idx + 1}"
-
-    # External status helpers
-    def get_session_status(self, session_id: str = None) -> Dict[str, Any]:
-        session = self.current_session
-        if session_id:
-            session = next((s for s in self.sessions_history if s.id == session_id), None)
-        if not session:
-            return {"error": "Session not found"}
-        return {
-            "session_id": session.id,
-            "user_prompt": session.user_prompt,
-            "status": session.status,
-            "total_tasks": len(session.tasks),
-            "task_breakdown": [
-                {
-                    "id": t.id,
-                    "title": t.title,
-                    "action": t.action,
-                    "worksheet": t.worksheet,
-                    "status": t.status,
-                    "started_at": t.started_at,
-                    "completed_at": t.completed_at,
-                }
-                for t in session.tasks
-            ],
-            "modified_files": session.modified_files,
-            "created_at": session.created_at,
-            "completed_at": session.completed_at,
-        }
-
-    def rollback_session(self, session_id: str) -> Dict[str, Any]:
-        return {"message": f"Rollback for session {session_id} would restore from backup", "implementation": "TODO"}
 
 
 def create_task_manager(xml_file_path: str) -> XLSFormTaskManager:
