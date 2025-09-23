@@ -31,6 +31,54 @@ class XLSFormXMLEditor:
         self.edit_history = []
         self.modified = False
 
+    def _ensure_highlight_styles(self) -> None:
+        """Ensure Styles exist for highlighting added/modified content.
+
+        - AIAdded: light red background for added rows
+        - AIModified: light orange background for modified cells
+        """
+        try:
+            ns = self.namespaces["ss"]
+            styles_tag = f"{{{ns}}}Styles"
+            style_tag = f"{{{ns}}}Style"
+            interior_tag = f"{{{ns}}}Interior"
+            id_attr = f"{{{ns}}}ID"
+            color_attr = f"{{{ns}}}Color"
+            pattern_attr = f"{{{ns}}}Pattern"
+
+            styles = self.root.find(f"./ss:Styles", self.namespaces)
+            if styles is None:
+                styles = ET.Element(styles_tag)
+                # Insert Styles near the top (before Worksheets if possible)
+                inserted = False
+                for idx, child in enumerate(list(self.root)):
+                    if child.tag.endswith("Worksheet"):
+                        self.root.insert(idx, styles)
+                        inserted = True
+                        break
+                if not inserted:
+                    self.root.insert(0, styles)
+
+            def ensure_style(style_id: str, bg_hex: str) -> None:
+                existing = None
+                for s in styles.findall(f"./ss:Style", self.namespaces):
+                    if s.get(id_attr) == style_id:
+                        existing = s
+                        break
+                if existing is None:
+                    s = ET.SubElement(styles, style_tag)
+                    s.set(id_attr, style_id)
+                    inter = ET.SubElement(s, interior_tag)
+                    inter.set(color_attr, bg_hex)
+                    inter.set(pattern_attr, "Solid")
+
+            # Light red for additions, light orange for edits
+            ensure_style("AIAdded", "#FFC7CE")
+            ensure_style("AIModified", "#FFD966")
+        except Exception:
+            # Non-fatal: highlighting is best-effort
+            pass
+
     def get_tree(self):
         """Get the XML tree for external access"""
         return self.tree
@@ -149,6 +197,7 @@ class XLSFormXMLEditor:
     def add_row(self, worksheet_name: str, row_data: List[str], insert_position: str = "end") -> bool:
         """Add a new row to a worksheet"""
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet(worksheet_name)
             if not worksheet:
                 return False
@@ -159,6 +208,8 @@ class XLSFormXMLEditor:
 
             # Create new row element
             new_row = ET.Element("{urn:schemas-microsoft-com:office:spreadsheet}Row")
+            # Mark row as AI-added (highlight)
+            new_row.set("{urn:schemas-microsoft-com:office:spreadsheet}StyleID", "AIAdded")
 
             # Add cells to the row
             for i, cell_data in enumerate(row_data):
@@ -360,6 +411,7 @@ class XLSFormXMLEditor:
         - Returns True if at least one matching row is updated
         """
         try:
+            self._ensure_highlight_styles()
             updated = 0
 
             # Gather candidate worksheets that look like choices
@@ -456,6 +508,8 @@ class XLSFormXMLEditor:
                             data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
                             data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
                         data_elem.text = str(new_value)
+                        # Highlight modified cell
+                        target_cell.set(f"{{{self.namespaces['ss']}}}StyleID", "AIModified")
                         updated += 1
 
             if updated > 0:
@@ -474,6 +528,7 @@ class XLSFormXMLEditor:
     def modify_cell(self, worksheet_name: str, row_index: int, column_index: int, new_value: str) -> bool:
         """Modify a specific cell value"""
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet(worksheet_name)
             if not worksheet:
                 return False
@@ -509,6 +564,8 @@ class XLSFormXMLEditor:
                 data_elem = ET.SubElement(cell, "{urn:schemas-microsoft-com:office:spreadsheet}Data")
                 data_elem.set("{urn:schemas-microsoft-com:office:spreadsheet}Type", "String")
                 data_elem.text = str(new_value)
+            # Highlight modified cell
+            cell.set("{urn:schemas-microsoft-com:office:spreadsheet}StyleID", "AIModified")
 
             self.modified = True
             return True
@@ -575,6 +632,7 @@ class XLSFormXMLEditor:
         Finds and removes a field (row) from the 'survey' worksheet by its unique name.
         """
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet("survey")
             if worksheet is None:
                 print("ERROR: 'survey' worksheet not found.")
@@ -679,6 +737,8 @@ class XLSFormXMLEditor:
                             data_elem.text = ""
                             self.modified = True
                             cleared_count += 1
+                            # Highlight cleared dependency as modification
+                            cell_to_check.set(f"{{{self.namespaces['ss']}}}StyleID", "AIModified")
 
                 cells = row_to_delete.findall(".//ss:Cell", self.namespaces)
                 if len(cells) > type_column_index:
@@ -723,6 +783,7 @@ class XLSFormXMLEditor:
         Handles sparse XML rows correctly.
         """
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet(worksheet_name)
             if worksheet is None:
                 print(f"ERROR: {worksheet_name} worksheet not found.")
@@ -825,6 +886,8 @@ class XLSFormXMLEditor:
             else:
                 data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
                 data_elem.text = str(new_value)
+            # Highlight modified cell
+            target_cell.set(f"{{{self.namespaces['ss']}}}StyleID", "AIModified")
 
             self.modified = True
             print(f" Successfully modified '{property_to_change}' in worksheet '{worksheet_name}'.")
@@ -1218,6 +1281,8 @@ class XLSFormXMLEditor:
                         del cell.attrib[style_id_key]
 
                 dest_table.append(row)
+                # Mark copied row as AI-added for visibility
+                row.set(style_id_key, "AIAdded")
                 self.modified = True
 
             print(f"✅ Copied {len(rows_to_copy)} fields to survey.")
@@ -1270,6 +1335,8 @@ class XLSFormXMLEditor:
                                             del choice_cell.attrib[style_id_key]
 
                                     dest_choice_table.append(row)
+                                    # Mark copied choice row as AI-added
+                                    row.set(style_id_key, "AIAdded")
                                     choices_copied_count += 1
                                     self.modified = True
                                 break  # Move to next row
