@@ -31,7 +31,7 @@ const Navbar = () => {
             <div className="flex-shrink-0 flex items-center">
               <Link to="/" className="flex items-center space-x-2">
                 <Activity className="h-8 w-8 text-primary-600" />
-                <span className="text-xl font-bold text-gray-900">DE4 Forms</span>
+                <span className="text-xl font-bold text-gray-900">Form Builder</span>
               </Link>
             </div>
 

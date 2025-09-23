@@ -10,16 +10,12 @@ const UploadPage = () => {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef(null);
 
-  const [prompt, setPrompt] = useState('');
-  const [targetSheet, setTargetSheet] = useState('');
-  const [aiRunning, setAiRunning] = useState(false);
-  const [aiResult, setAiResult] = useState(null);
+  
 
   const handleFileSelect = (selectedFile) => {
     if (selectedFile && (selectedFile.name.endsWith('.xml') || selectedFile.name.endsWith('.xls'))) {
       setFile(selectedFile);
       setUploadResult(null);
-      setAiResult(null);
     } else {
       toast.error('Please select a valid XML or XLS file');
     }
@@ -66,56 +62,21 @@ const UploadPage = () => {
   const removeFile = () => {
     setFile(null);
     setUploadResult(null);
-    setAiResult(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   };
 
-  const handleRunAiEdit = async () => {
-    if (!uploadResult) {
-      toast.error('Upload a file first.');
-      return;
-    }
-    if (!prompt.trim()) {
-      toast.error('Enter a prompt to run AI edit.');
-      return;
-    }
-    setAiRunning(true);
-    setAiResult(null);
-    try {
-      const res = await fileAPI.aiEdit(prompt.trim(), targetSheet || null);
-      setAiResult(res.data);
-      if (res.data?.success) {
-        toast.success('AI edit completed.');
-      } else {
-        toast.error(res.data?.error || 'AI edit failed.');
-      }
-    } catch (e) {
-      console.error('AI edit failed:', e);
-      toast.error('AI edit failed.');
-    } finally {
-      setAiRunning(false);
-    }
-  };
+  
 
-  const handleExport = async () => {
+  const handleDeleteUploaded = async () => {
     try {
-      const res = await fileAPI.export();
-      const blob = new Blob([res.data], { type: 'application/xml' });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      // Try to infer a filename
-      const baseName = uploadResult?.file_path ? uploadResult.file_path.split('/').pop() : 'form.xml';
-      link.href = url;
-      link.download = `export_${baseName}`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
+      await fileAPI.deleteUploaded();
+      removeFile();
+      toast.success('Uploaded form deleted');
     } catch (e) {
-      console.error('Export failed:', e);
-      toast.error('Export failed.');
+      console.error('Delete failed:', e);
+      toast.error(e?.response?.data?.detail || 'Delete failed.');
     }
   };
 
@@ -258,8 +219,9 @@ const UploadPage = () => {
                   <p className="text-xs text-gray-500 mt-1">
                     Continue to the AI Editor to apply changes and export your XML
                   </p>
-                  <div className="mt-3">
+                  <div className="mt-3 flex items-center gap-3">
                     <a className="btn-primary" href="/editor">Go to AI Editor</a>
+                    <button onClick={handleDeleteUploaded} className="btn-danger">Delete Uploaded</button>
                   </div>
                 </div>
               </div>

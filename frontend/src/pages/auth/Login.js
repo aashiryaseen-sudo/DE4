@@ -48,7 +48,7 @@ const Login = () => {
             <Activity className="h-12 w-12 text-primary-600" />
           </div>
           <h2 className="mt-6 text-center text-3xl font-bold text-gray-900">
-            Sign in to DE4 Forms
+            Sign in to Form Builder
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
             Or{' '}

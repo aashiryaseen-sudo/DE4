@@ -1201,18 +1201,7 @@ async def ai_edit_endpoint(
         result = await agent.process_prompt(enhanced_prompt)
         # print(f"🔍 AI edit result: {result}")
 
-        # Store the prompt in edit history
-        edit_history = user_form_session.edit_history_json or []
-        edit_history.append(
-            {
-                "timestamp": datetime.utcnow().isoformat(),
-                "prompt": prompt,
-                "target_sheet": target_sheet,
-                "success": result.get("success", False),
-                "response": result.get("agent_response", ""),
-            }
-        )
-        user_form_session.edit_history_json = edit_history
+        # Defer history update to a single consolidated entry later
 
         if result["success"]:
             # Check for modified file
@@ -1285,11 +1274,11 @@ async def ai_edit_endpoint(
         print(f"  - actual_success: {actual_success}")
         print(f"  - agent_response preview: {agent_response[:200]}...")
 
-        # Update history regardless of success/failure
+        # Single consolidated history update (exactly one entry per attempt)
         history = user_form_session.edit_history_json or []
         history.append(
             {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "prompt": prompt,
                 "target_sheet": target_sheet,
                 "success": actual_success,
@@ -1820,6 +1809,80 @@ async def reset_active_session(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset sessions: {str(e)}")
 
+
+@app.delete("/api/upload")
+async def delete_uploaded_form(
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_database_session)
+):
+    """Delete ONLY the current uploaded session and its files (no master/forms deletion).
+
+    - Removes the active UserFormSession's files under uploads/{user}/{session}
+    - Deletes the UserFormSession row (or resets it if delete fails)
+    - Does NOT modify master_forms, form_versions, or customization_requests
+    """
+    from database_schema import FormWorkStatus
+    try:
+        # Locate active form session
+        from database_schema import UserFormSession
+        import shutil
+        session_row = (
+            db.query(UserFormSession)
+            .filter(UserFormSession.user_id == current_user.id, UserFormSession.status == FormWorkStatus.ACTIVE.value)
+            .order_by(UserFormSession.created_at.desc())
+            .first()
+        )
+        if not session_row or not session_row.original_file_path:
+            raise HTTPException(status_code=404, detail="No active uploaded form to delete")
+
+        # Delete files on disk (best-effort): remove the containing session folder
+        try:
+            base_dir = os.path.dirname(session_row.original_file_path)
+            if os.path.isdir(base_dir):
+                shutil.rmtree(base_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # Delete the session row to fully clear the upload context
+        session_id = session_row.id
+        try:
+            db.delete(session_row)
+        except Exception:
+            # Fallback: reset session if deletion fails
+            session_row.status = FormWorkStatus.COMPLETED.value
+            session_row.original_file_path = None
+            session_row.modified_file_path = None
+            session_row.analysis_json = None
+            session_row.edit_history_json = []
+            session_row.updated_at = datetime.now(timezone.utc)
+            db.add(session_row)
+
+        db.commit()
+
+        # Audit log
+        get_operation_logger().log_operation(
+            operation_type=OperationType.DELETE,
+            description="Deleted current uploaded session and files",
+            target_type="uploaded_session",
+            target_name=str(session_id),
+            user_id=current_user.id,
+            success=True,
+            after_data={"session_id": str(session_id)},
+        )
+
+        return {"success": True, "message": "Uploaded session deleted", "session_id": str(session_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        get_operation_logger().log_operation(
+            operation_type=OperationType.DELETE,
+            description="Delete uploaded session failed",
+            target_type="uploaded_session",
+            user_id=current_user.id,
+            success=False,
+            error_message=str(e),
+        )
+        raise HTTPException(status_code=500, detail=f"Delete uploaded session failed: {str(e)}")
 
 @app.get("/api/status")
 async def get_status(
