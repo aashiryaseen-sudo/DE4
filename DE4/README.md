@@ -26,7 +26,7 @@ A powerful backend API for AI-powered XLSForm editing using natural language pro
 2. **Create virtual environment**
    ```bash
    python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   venv\Scripts\activate
    ```
 
 3. **Install dependencies**

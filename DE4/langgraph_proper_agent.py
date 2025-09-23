@@ -7,6 +7,8 @@ Based on official LangGraph documentation and patterns
 import json
 import os
 import re
+import tempfile
+from datetime import datetime
 from typing import Annotated, Sequence, TypedDict
 
 from dotenv import load_dotenv
@@ -17,6 +19,8 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
+from database import get_database_session
+from database_schema import FormVersion, MasterForm
 from task_manager import create_task_manager
 from xml_editor import create_xml_editor
 
@@ -321,6 +325,95 @@ class XLSFormProperAgent:
             except Exception as e:
                 return json.dumps({"success": False, "error": str(e)})
 
+        @tool
+        def merge_forms_from_db(source_form_name: str, destination_form_name: str, field_names_csv: str) -> str:
+            """
+            Copies specified fields (and their choices) from a source form into a destination form.
+            This tool searches the database for both forms, copies the data, and saves a new file.
+            Args:
+                source_form_name (str): The name (form_title) of the form to COPY FROM.
+                destination_form_name (str): The name (form_title) of the form to COPY TO.
+                field_names_csv (str): A comma-separated list of field names or labels to copy.
+            """
+            from main import decompress_xml_from_base64
+
+            print(f"🚀 Executing merge_forms_from_db...")
+            db = next(get_database_session())
+            try:
+                # 1. Get Source Form XML
+                source_master = db.query(MasterForm).filter(MasterForm.name == source_form_name).first()
+                if not source_master:
+                    return json.dumps({"success": False, "error": f"Source form '{source_form_name}' not found."})
+
+                source_version = (
+                    db.query(FormVersion)
+                    .filter(FormVersion.master_form_id == source_master.id, FormVersion.is_current == True)
+                    .first()
+                )
+                if not source_version:
+                    return json.dumps(
+                        {"success": False, "error": f"No 'current' version found for source form '{source_form_name}'."}
+                    )
+
+                source_xml = decompress_xml_from_base64(source_version.xml_content)
+                if not source_xml:
+                    return json.dumps(
+                        {"success": False, "error": f"Source form '{source_form_name}' has no XML content."}
+                    )
+
+                # 2. Get Destination Form XML (using the agent's current file)
+                # The 'destination' is the file already loaded into the agent
+                if not os.path.exists(self.xml_file_path):
+                    return json.dumps(
+                        {"success": False, "error": f"Destination file path not valid: {self.xml_file_path}"}
+                    )
+
+                # 3. Save source XML to a temp file for the editor
+                with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".xml", encoding="utf-8") as f:
+                    f.write(source_xml)
+                    source_temp_path = f.name
+
+                print(f"🔍 Source XML saved to temp file: {source_temp_path}")
+
+                # 4. Initialize editor with the DESTINATION file
+                editor = create_xml_editor(self.xml_file_path, base_original_path=self.base_original_path)
+
+                # 5. Call the new merge function
+                fields_to_copy = [f.strip() for f in field_names_csv.split(",") if f.strip()]
+                merge_result = editor.merge_fields_from_source(source_temp_path, fields_to_copy)
+
+                os.remove(source_temp_path)  # Clean up temp file
+
+                if not merge_result.get("success"):
+                    return json.dumps(merge_result)
+
+                # 6. Save the newly merged file
+                new_name_base = destination_form_name.replace(" ", "_").replace(".xml", "")
+
+                original_dir = os.path.dirname(self.base_original_path)
+
+                new_filename = f"modified_MERGE_{new_name_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml"
+                output_path = os.path.join(original_dir, new_filename)
+
+                output_path = editor.save_modified_xml(output_path=output_path)
+
+                return json.dumps(
+                    {
+                        "success": True,
+                        "message": f"Successfully merged {merge_result.get('fields_copied_count', 0)} fields and {merge_result.get('choices_copied_count', 0)} choices.",
+                        "new_form_path": output_path,
+                    },
+                    indent=2,
+                )
+
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                return json.dumps({"success": False, "error": str(e)})
+            finally:
+                db.close()
+
         return [
             add_choice_option_to_list,
             add_choice_options_batch,
@@ -332,6 +425,7 @@ class XLSFormProperAgent:
             modify_field_property,
             modify_choice,
             clone_form_with_filter,
+            merge_forms_from_db,
         ]
 
     def _build_graph(self):
@@ -382,6 +476,12 @@ class XLSFormProperAgent:
             - Your process for this is:
             - 1. First, you MUST use the 'create_task_plan' tool. Pass the user's entire prompt to it.
             - 2. Second, you MUST use the 'execute_task_plan' tool to run the plan.
+                                          
+            Workflow 3: MERGING FORMS
+            If the user's request is to 'merge', 'copy questions from', or 'add fields from' another form...
+            - THEN you MUST call the 'merge_forms_from_db' tool.
+            - You MUST identify the 'source_form_name', 'destination_form_name', and 'field_names_csv' from user's request.
+
 
             Do not call any other atomic tools (like add_row_auto, delete_field) directly. Your choice is between 'clone_form_with_filter' OR the 'create_task_plan' sequence.""")
 

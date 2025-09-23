@@ -28,10 +28,13 @@ const Files = () => {
   const fetchStatus = async () => {
     try {
       const response = await systemAPI.getStatus();
-      setStatus(response.data);
+      const data = response.data;
+      setStatus(data);
+      return data;
     } catch (error) {
       console.error('Failed to fetch status:', error);
       toast.error('Failed to load file status');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -88,6 +91,18 @@ const Files = () => {
       window.URL.revokeObjectURL(url);
       
       toast.success('File exported successfully!');
+      
+      // Refresh status to check if session was reset (use fresh value, not stale state)
+      const freshStatus = await fetchStatus();
+      
+      // If no file is uploaded (session was reset), redirect to upload page
+      if (freshStatus && !freshStatus.has_file_uploaded) {
+        toast.success('Session completed! Please upload a new file to continue.');
+        // Redirect to upload page after a short delay
+        setTimeout(() => {
+          window.location.href = '/upload';
+        }, 2000);
+      }
     } catch (error) {
       console.error('Export failed:', error);
       toast.error('Export failed. Please try again.');

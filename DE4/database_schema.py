@@ -350,7 +350,15 @@ class FormOperation(Base):
     operation_id = Column(String(100), unique=True, nullable=False, index=True)
     
     # Operation details
-    operation_type = Column(Enum(OperationType), nullable=False)
+    operation_type = Column(
+        Enum(
+            OperationType,
+            name="operation_type",
+            native_enum=True,
+            values_callable=lambda enum: [e.value for e in enum],
+        ),
+        nullable=False,
+    )
     operation_description = Column(String(500), nullable=False)
     
     # Target information

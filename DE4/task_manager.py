@@ -169,21 +169,32 @@ class XLSFormTaskManager:
                     continue
 
             if ("delete" in s.lower() or "remove" in s.lower()) and "field" in s.lower():
-                field_name = self._extract(r"(?:delete|remove)\s+(?:the\s+)?field\s+['\"]?([\w\-]+)['\"]?", s)
-                if field_name:
-                    title = f"Delete field '{field_name}' from survey"
-                    tasks.append(
-                        DynTask(
-                            id=self._tid(len(tasks)),
-                            title=title,
-                            action="delete_field",
-                            worksheet="survey",
-                            parameters={"field_name": field_name},
-                        )
-                    )
-                    continue
+                # Extract the entire string of field names, stopping at "from", "in", or the end
+                field_list_str = self._extract(
+                    r"(?:delete|remove)\s+(?:the\s+)?field[s]?\s+(.+?)(?:\s+from|\s+in|$)", s
+                )
 
-            # add row with data: v1,v2,... [in/to <sheet> sheet]
+                if field_list_str:
+                    # Find all individual field names (handles quotes, commas, and spaces)
+                    field_names = re.findall(r"[\w\-]+", field_list_str)
+
+                    if not field_names:
+                        continue  
+
+                    # Create a separate task for EACH field found
+                    for field_name in field_names:
+                        title = f"Delete field '{field_name}' from survey"
+                        tasks.append(
+                            DynTask(
+                                id=self._tid(len(tasks)),
+                                title=title,
+                                action="delete_field",
+                                worksheet="survey",
+                                parameters={"field_name": field_name},
+                            )
+                        )
+                    continue  
+
             if "add" in s.lower() and "row" in s.lower() and "data" in s.lower():
                 sheet_hint = "auto_detect"
                 if "to survey" in s.lower() or "in survey" in s.lower():
@@ -192,7 +203,12 @@ class XLSFormTaskManager:
                     sheet_hint = "settings"
 
                 data_str = self._extract(r"data:\s*(.+)$", s)
-                data = [d.strip() for d in data_str.split(",")] if data_str else []
+                #  Use regex to handle quoted or unquoted comma-separated items
+                data = []
+                if data_str:
+                    data = re.findall(r"['\"]?([^,']+)['\"]?", data_str)
+                    data = [d.strip() for d in data if d.strip()]  # Clean up
+
                 title = f"Add row with {len(data)} values to {sheet_hint}"
                 tasks.append(
                     DynTask(
@@ -204,13 +220,16 @@ class XLSFormTaskManager:
                     )
                 )
                 continue
-            # add choices/options X,Y,Z to list NAME
+
             if re.search(r"add\s+(choices?|options?)", s, re.IGNORECASE) and "list" in s.lower():
                 list_name = self._extract(r"(?:to|in)\s+list\s+['\"]?([\w\-]+)['\"]?", s) or "default_list"
                 items_str = self._extract(r"add\s+(?:choices?|options?)\s+(.*?)\s+(?:to|in)\s+list", s)
 
+                items = []
                 if items_str:
-                    items = [item.strip() for item in items_str.strip(" '\"").split(",") if item.strip()]
+                    #  Use regex to handle quoted or unquoted comma-separated items
+                    items = re.findall(r"['\"]?([^,']+)['\"]?", items_str)
+                    items = [item.strip() for item in items if item.strip()]  # Clean up
 
                 if len(items) > 1:
                     title = f"Add {len(items)} choices to list {list_name}"
@@ -234,8 +253,7 @@ class XLSFormTaskManager:
                             parameters={"list_name": list_name, "label": items[0], "name": items[0]},
                         )
                     )
-                    continue
-
+                continue
         if not tasks:
             tasks.append(
                 DynTask(
@@ -311,7 +329,15 @@ class XLSFormTaskManager:
                 failed.append(task)
 
             task.completed_at = datetime.now().isoformat()
-            results.append({"task_id": task.id, "title": task.title, "status": task.status, "result": task.result, "error": task.error_message})
+            results.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "status": task.status,
+                    "result": task.result,
+                    "error": task.error_message,
+                }
+            )
 
         final_output_path = None
         if editor.modified:
@@ -365,7 +391,7 @@ class XLSFormTaskManager:
         result = {"success": ok}
 
         return result
-    
+
     def _handle_modify_field_property(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         worksheet_name = params.get("worksheet_name")
         key_field_name = params.get("key_field_name")
@@ -415,23 +441,23 @@ class XLSFormTaskManager:
         return result
 
     def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
-            list_name = params.get("list_name")
-            choice_name = params.get("choice_name")
-            prop_name = params.get("property_to_change")
-            new_value = params.get("new_value")
+        list_name = params.get("list_name")
+        choice_name = params.get("choice_name")
+        prop_name = params.get("property_to_change")
+        new_value = params.get("new_value")
 
-            if not all([list_name, choice_name, prop_name, new_value is not None]):
-                return {"success": False, "error": "Missing one of required parameters for modify_choice"}
+        if not all([list_name, choice_name, prop_name, new_value is not None]):
+            return {"success": False, "error": "Missing one of required parameters for modify_choice"}
 
-            success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
-            result = {"success": success}
+        success = editor.modify_choice_property(list_name, choice_name, prop_name, new_value)
+        result = {"success": success}
 
-            if success and editor.modified:
-                result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
-            elif not success:
-                result["message"] = f"Could not modify choice '{choice_name}'."
+        if success and editor.modified:
+            result["message"] = f"Choice '{choice_name}' in list '{list_name}' was updated."
+        elif not success:
+            result["message"] = f"Could not modify choice '{choice_name}'."
 
-            return result
+        return result
 
     def _handle_modify_choice(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
         list_name = params.get("list_name")

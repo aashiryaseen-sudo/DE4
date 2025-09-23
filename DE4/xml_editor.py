@@ -31,6 +31,54 @@ class XLSFormXMLEditor:
         self.edit_history = []
         self.modified = False
 
+    def _ensure_highlight_styles(self) -> None:
+        """Ensure Styles exist for highlighting added/modified content.
+
+        - AIAdded: light red background for added rows
+        - AIModified: light orange background for modified cells
+        """
+        try:
+            ns = self.namespaces["ss"]
+            styles_tag = f"{{{ns}}}Styles"
+            style_tag = f"{{{ns}}}Style"
+            interior_tag = f"{{{ns}}}Interior"
+            id_attr = f"{{{ns}}}ID"
+            color_attr = f"{{{ns}}}Color"
+            pattern_attr = f"{{{ns}}}Pattern"
+
+            styles = self.root.find(f"./ss:Styles", self.namespaces)
+            if styles is None:
+                styles = ET.Element(styles_tag)
+                # Insert Styles near the top (before Worksheets if possible)
+                inserted = False
+                for idx, child in enumerate(list(self.root)):
+                    if child.tag.endswith("Worksheet"):
+                        self.root.insert(idx, styles)
+                        inserted = True
+                        break
+                if not inserted:
+                    self.root.insert(0, styles)
+
+            def ensure_style(style_id: str, bg_hex: str) -> None:
+                existing = None
+                for s in styles.findall(f"./ss:Style", self.namespaces):
+                    if s.get(id_attr) == style_id:
+                        existing = s
+                        break
+                if existing is None:
+                    s = ET.SubElement(styles, style_tag)
+                    s.set(id_attr, style_id)
+                    inter = ET.SubElement(s, interior_tag)
+                    inter.set(color_attr, bg_hex)
+                    inter.set(pattern_attr, "Solid")
+
+            # Light red for additions, light orange for edits
+            ensure_style("AIAdded", "#FFC7CE")
+            ensure_style("AIModified", "#FFD966")
+        except Exception:
+            # Non-fatal: highlighting is best-effort
+            pass
+
     def get_tree(self):
         """Get the XML tree for external access"""
         return self.tree
@@ -149,6 +197,7 @@ class XLSFormXMLEditor:
     def add_row(self, worksheet_name: str, row_data: List[str], insert_position: str = "end") -> bool:
         """Add a new row to a worksheet"""
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet(worksheet_name)
             if not worksheet:
                 return False
@@ -159,6 +208,8 @@ class XLSFormXMLEditor:
 
             # Create new row element
             new_row = ET.Element("{urn:schemas-microsoft-com:office:spreadsheet}Row")
+            # Mark row as AI-added (highlight)
+            new_row.set("{urn:schemas-microsoft-com:office:spreadsheet}StyleID", "AIAdded")
 
             # Add cells to the row
             for i, cell_data in enumerate(row_data):
@@ -360,6 +411,7 @@ class XLSFormXMLEditor:
         - Returns True if at least one matching row is updated
         """
         try:
+            self._ensure_highlight_styles()
             updated = 0
 
             # Gather candidate worksheets that look like choices
@@ -456,6 +508,8 @@ class XLSFormXMLEditor:
                             data_elem = ET.SubElement(target_cell, f"{{{self.namespaces['ss']}}}Data")
                             data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
                         data_elem.text = str(new_value)
+                        # Highlight modified cell
+                        target_cell.set(f"{{{self.namespaces['ss']}}}StyleID", "AIModified")
                         updated += 1
 
             if updated > 0:
@@ -474,6 +528,7 @@ class XLSFormXMLEditor:
     def modify_cell(self, worksheet_name: str, row_index: int, column_index: int, new_value: str) -> bool:
         """Modify a specific cell value"""
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet(worksheet_name)
             if not worksheet:
                 return False
@@ -509,6 +564,8 @@ class XLSFormXMLEditor:
                 data_elem = ET.SubElement(cell, "{urn:schemas-microsoft-com:office:spreadsheet}Data")
                 data_elem.set("{urn:schemas-microsoft-com:office:spreadsheet}Type", "String")
                 data_elem.text = str(new_value)
+            # Highlight modified cell
+            cell.set("{urn:schemas-microsoft-com:office:spreadsheet}StyleID", "AIModified")
 
             self.modified = True
             return True
@@ -575,6 +632,7 @@ class XLSFormXMLEditor:
         Finds and removes a field (row) from the 'survey' worksheet by its unique name.
         """
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet("survey")
             if worksheet is None:
                 print("ERROR: 'survey' worksheet not found.")
@@ -589,11 +647,13 @@ class XLSFormXMLEditor:
             try:
                 name_column_index = headers.index("name")
                 type_column_index = headers.index("type")
+                label_column_index = 2
             except ValueError:
                 print("ERROR: 'name' or 'type' column not found in survey headers.")
                 return False
 
             row_to_delete = None
+            search_mode = "name"
             all_rows = table.findall(".//ss:Row", self.namespaces)
             data_rows = all_rows[1:]
             for row in data_rows:
@@ -614,9 +674,59 @@ class XLSFormXMLEditor:
                 if found_cell:
                     break
 
+            if row_to_delete is None:
+                search_mode = "label (index 2)"
+                print(f"WARN: Field name '{field_name}' not found. Falling back to search by label at index 2.")
+                for row in data_rows:
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+                    current_idx = 0
+                    found_cell = False
+                    for cell in cells:
+                        index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                        if index_attr:
+                            current_idx = int(index_attr) - 1
+
+                        if current_idx == label_column_index:  # This will now use index 2
+                            data_elem = cell.find(".//ss:Data", self.namespaces)
+                            # Match if the search term is *in* the label
+                            if data_elem is not None and data_elem.text and field_name in data_elem.text:
+                                row_to_delete = row
+                                found_cell = True
+                                break
+                        current_idx += 1
+                    if found_cell:
+                        break
+
             if row_to_delete is not None:
-                print(f"Scanning all cells for dependencies of field '{field_name}'...")
-                dependency_pattern = f"${{{field_name}}}"
+                print(f"Found row to delete by {search_mode}.")
+                actual_field_name = ""
+                actual_field_type_string = ""
+                cells = row_to_delete.findall(".//ss:Cell", self.namespaces)
+                current_idx = 0
+                for cell in cells:
+                    index_attr = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                    if index_attr:
+                        current_idx = int(index_attr) - 1
+
+                    if current_idx == name_column_index:
+                        data_elem = cell.find(".//ss:Data", self.namespaces)
+                        if data_elem is not None:
+                            actual_field_name = data_elem.text
+                    elif current_idx == type_column_index:
+                        data_elem = cell.find(".//ss:Data", self.namespaces)
+                        if data_elem is not None:
+                            actual_field_type_string = data_elem.text
+
+                    current_idx += 1
+
+                if not actual_field_name:
+                    actual_field_name = field_name
+                    print(
+                        f"WARN: Could not find 'name' for the row. Using search term '{field_name}' for dependency scan."
+                    )
+
+                print(f"Scanning all cells for dependencies of field '{actual_field_name}'...")
+                dependency_pattern = f"${{{actual_field_name}}}"
                 cleared_count = 0
                 for other_row in data_rows:
                     if other_row == row_to_delete:
@@ -627,6 +737,8 @@ class XLSFormXMLEditor:
                             data_elem.text = ""
                             self.modified = True
                             cleared_count += 1
+                            # Highlight cleared dependency as modification
+                            cell_to_check.set(f"{{{self.namespaces['ss']}}}StyleID", "AIModified")
 
                 cells = row_to_delete.findall(".//ss:Cell", self.namespaces)
                 if len(cells) > type_column_index:
@@ -635,7 +747,7 @@ class XLSFormXMLEditor:
                     if type_data_elem is not None and type_data_elem.text:
                         type_string = type_data_elem.text
                         # Use regex to find and extract the list_name
-                        match = re.match(r"^(select_one|select_multiple)\s+(\S+)", type_string)
+                        match = re.match(r"^(select_one|select_multiple)\s+(\S+)", actual_field_name)
                         if match:
                             list_name_to_delete = match.group(2)
                             print(
@@ -650,7 +762,9 @@ class XLSFormXMLEditor:
                     table.set("{urn:schemas-microsoft-com:office:spreadsheet}ExpandedRowCount", str(current_count - 1))
 
                 self.modified = True
-                print(f"Successfully found and removed field: {field_name}")
+                print(
+                    f"Successfully found and removed field with {search_mode} '{field_name}' (actual name: '{actual_field_name}')"
+                )
                 return True
             else:
                 print(f"WARN: Field '{field_name}' not found in survey.")
@@ -669,6 +783,7 @@ class XLSFormXMLEditor:
         Handles sparse XML rows correctly.
         """
         try:
+            self._ensure_highlight_styles()
             worksheet = self.find_worksheet(worksheet_name)
             if worksheet is None:
                 print(f"ERROR: {worksheet_name} worksheet not found.")
@@ -771,6 +886,8 @@ class XLSFormXMLEditor:
             else:
                 data_elem.set(f"{{{self.namespaces['ss']}}}Type", "String")
                 data_elem.text = str(new_value)
+            # Highlight modified cell
+            target_cell.set(f"{{{self.namespaces['ss']}}}StyleID", "AIModified")
 
             self.modified = True
             print(f" Successfully modified '{property_to_change}' in worksheet '{worksheet_name}'.")
@@ -1055,6 +1172,193 @@ class XLSFormXMLEditor:
             "modified": self.modified,
             "edit_history": self.edit_history,
         }
+
+    def merge_fields_from_source(self, source_xml_path: str, fields_to_copy: List[str]) -> Dict[str, Any]:
+        """
+        Merges fields (and their choices) from a source XML file into this instance.
+        Searches by field name first, then by label (column index 2).
+        """
+        print(f"Attempting to merge fields: {fields_to_copy}")
+        try:
+            source_tree = ET.parse(source_xml_path)
+            source_root = source_tree.getroot()
+
+            # --- Find Source Survey ---
+            source_survey_ws = None
+            for ws in source_root.findall(".//ss:Worksheet", self.namespaces):
+                if ws.get(f"{{{self.namespaces['ss']}}}Name") == "survey":
+                    source_survey_ws = ws
+                    break
+            if source_survey_ws is None:
+                # Note: The original code had a bug here, finding self.find_worksheet("survey") first.
+                # This corrected version only searches the source_root.
+                return {"success": False, "error": "Source survey worksheet not found"}
+
+            source_table = self.find_table_in_worksheet(source_survey_ws)
+            if source_table is None:
+                return {"success": False, "error": "Source survey table not found"}
+
+            source_headers = self.get_headers(source_table)
+            try:
+                source_name_idx = source_headers.index("name")
+                source_type_idx = source_headers.index("type")
+                source_label_idx = 2  # As per original logic
+            except ValueError:
+                return {"success": False, "error": "'name' or 'type' not found in source headers."}
+
+            # --- Find Destination Survey ---
+            dest_survey_ws = self.find_worksheet("survey")
+            if dest_survey_ws is None:
+                return {"success": False, "error": "Destination survey worksheet not found"}
+            dest_table = self.find_table_in_worksheet(dest_survey_ws)
+            if dest_table is None:
+                return {"success": False, "error": "Destination survey table not found"}
+
+            rows_to_copy = []
+            used_choice_lists = set()
+            source_rows = source_table.findall(".//ss:Row", self.namespaces)[1:]  # Skip header
+
+            # --- Pass 1: Find all survey rows to copy ---
+            for field_name in fields_to_copy:
+                found_row = None
+
+                # Search by name
+                for row in source_rows:
+                    cells = row.findall(".//ss:Cell", self.namespaces)
+                    current_idx = 0
+                    for cell in cells:
+                        if cell.get(f"{{{self.namespaces['ss']}}}Index"):
+                            current_idx = int(cell.get(f"{{{self.namespaces['ss']}}}Index")) - 1
+                        if current_idx == source_name_idx:
+                            data = cell.find(".//ss:Data", self.namespaces)
+                            if data is not None and data.text == field_name:
+                                found_row = row
+                                break
+                        current_idx += 1
+                    if found_row:
+                        break
+
+                # Search by label (fallback)
+                if found_row is None:
+                    for row in source_rows:
+                        cells = row.findall(".//ss:Cell", self.namespaces)
+                        current_idx = 0
+                        for cell in cells:
+                            if cell.get(f"{{{self.namespaces['ss']}}}Index"):
+                                current_idx = int(cell.get(f"{{{self.namespaces['ss']}}}Index")) - 1
+                            if current_idx == source_label_idx:
+                                data = cell.find(".//ss:Data", self.namespaces)
+                                if data is not None and data.text and field_name in data.text:
+                                    found_row = row
+                                    break
+                            current_idx += 1
+                        if found_row:
+                            break
+
+                # If found, add to list and check for choices
+                if found_row:
+                    rows_to_copy.append(found_row)
+                    cells = found_row.findall(".//ss:Cell", self.namespaces)
+                    current_idx = 0
+                    for cell in cells:
+                        if cell.get(f"{{{self.namespaces['ss']}}}Index"):
+                            current_idx = int(cell.get(f"{{{self.namespaces['ss']}}}Index")) - 1
+                        if current_idx == source_type_idx:
+                            data = cell.find(".//ss:Data", self.namespaces)
+                            if data is not None and data.text:
+                                match = re.match(r"^(select_one|select_multiple)\s+(\S+)", data.text)
+                                if match:
+                                    used_choice_lists.add(match.group(2))
+                            break
+                        current_idx += 1
+
+            # --- Pass 2: Copy survey rows (with fixes) ---
+            style_id_key = f"{{{self.namespaces['ss']}}}StyleID"
+            for row in rows_to_copy:
+                # FIX 1: Strip StyleID from all cells in the row
+                for cell in row.findall(".//ss:Cell", self.namespaces):
+                    if style_id_key in cell.attrib:
+                        del cell.attrib[style_id_key]
+
+                dest_table.append(row)
+                # Mark copied row as AI-added for visibility
+                row.set(style_id_key, "AIAdded")
+                self.modified = True
+
+            print(f"✅ Copied {len(rows_to_copy)} fields to survey.")
+
+            # FIX 2: Update ExpandedRowCount for survey table
+            # We count all rows (including header)
+            new_survey_row_count = len(dest_table.findall(".//ss:Row", self.namespaces))
+            dest_table.set(f"{{{self.namespaces['ss']}}}ExpandedRowCount", str(new_survey_row_count))
+            print(f"✅ Updated survey ExpandedRowCount to {new_survey_row_count}.")
+
+            # --- Pass 3: Copy choice rows (with fixes) ---
+            choices_copied_count = 0
+            if used_choice_lists:
+                for sheet_name in ["select_one", "select_multiple"]:
+                    source_choice_ws = None
+                    for ws in source_root.findall(".//ss:Worksheet", self.namespaces):
+                        if ws.get(f"{{{self.namespaces['ss']}}}Name") == sheet_name:
+                            source_choice_ws = ws
+                            break
+
+                    dest_choice_ws = self.find_worksheet(sheet_name)
+                    if source_choice_ws is None or dest_choice_ws is None:
+                        continue
+
+                    source_choice_table = self.find_table_in_worksheet(source_choice_ws)
+                    dest_choice_table = self.find_table_in_worksheet(dest_choice_ws)
+                    if source_choice_table is None or dest_choice_table is None:
+                        continue
+
+                    try:
+                        source_choice_headers = self.get_headers(source_choice_table)
+                        list_name_idx = source_choice_headers.index("list name")
+                    except ValueError:
+                        continue  # Skip sheet if no 'list name' header
+
+                    # Find and append all matching choice rows
+                    for row in source_choice_table.findall(".//ss:Row", self.namespaces)[1:]:
+                        cells = row.findall(".//ss:Cell", self.namespaces)
+                        current_idx = 0
+                        for cell in cells:
+                            if cell.get(f"{{{self.namespaces['ss']}}}Index"):
+                                current_idx = int(cell.get(f"{{{self.namespaces['ss']}}}Index")) - 1
+
+                            if current_idx == list_name_idx:
+                                data = cell.find(".//ss:Data", self.namespaces)
+                                if data is not None and data.text in used_choice_lists:
+                                    # FIX 1: Strip StyleID from all cells in the choice row
+                                    for choice_cell in row.findall(".//ss:Cell", self.namespaces):
+                                        if style_id_key in choice_cell.attrib:
+                                            del choice_cell.attrib[style_id_key]
+
+                                    dest_choice_table.append(row)
+                                    # Mark copied choice row as AI-added
+                                    row.set(style_id_key, "AIAdded")
+                                    choices_copied_count += 1
+                                    self.modified = True
+                                break  # Move to next row
+                            current_idx += 1
+
+                    # FIX 2: Update ExpandedRowCount for this choice table
+                    # We count all rows (including header)
+                    new_choice_row_count = len(dest_choice_table.findall(".//ss:Row", self.namespaces))
+                    dest_choice_table.set(f"{{{self.namespaces['ss']}}}ExpandedRowCount", str(new_choice_row_count))
+                    print(f"✅ Updated {sheet_name} ExpandedRowCount to {new_choice_row_count}.")
+
+            print(f"✅ Copied {choices_copied_count} choices.")
+            return {
+                "success": True,
+                "fields_copied_count": len(rows_to_copy),
+                "choices_copied_count": choices_copied_count,
+            }
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
 
     def save_modified_xml(self, output_path: str = None) -> str:
         """Save the modified XML to a new file with timestamp"""

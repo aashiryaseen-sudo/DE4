@@ -143,7 +143,6 @@ tmp/
 *_backup.*
 modified_*.xml
 backup_*.xml
-*.json
 config.json
 secrets.json
 
