@@ -1306,6 +1306,8 @@ class XLSFormXMLEditor:
         """
         print(f"Attempting to merge fields: {fields_to_copy}")
         try:
+            self._ensure_highlight_styles()
+
             source_tree = ET.parse(source_xml_path)
             source_root = source_tree.getroot()
 
