@@ -190,7 +190,20 @@ class XLSFormTaskManager:
         - A user's request to change a "question" or "field" refers to the 'survey' sheet. For `ModifyFieldPropertyParams`, 
         the `worksheet_name` is 'survey', `key_field_name` is 'name', and `key_field_value` is the question's name.
         - A "setting" refers to the 'settings' sheet.
+        - when user request for changing title,version e.t.c they are reffering to settings sheet.
         - When adding choices, always use `add_choice_batch`.
+
+        Important Guidelines:
+        - There are 4 sheets survey, select_one, select_multiple, settings.
+        - survey sheet contains these columns: name, type, label, appearance, required, relevant, hint, constraint, constraint_message,
+        calculation, repeat_count, read_only, default, image, audio, media::audio, media::video, timestamp_req, 
+        fetch_data_from_riptide, fetch_data_for_field_name, riptide_api_prop_name, fetch_unit_tag_from_field_name, 
+        include_in_building_profiles, equipment_type, equipment_code, fetch_heat_type_from_field_name, fetch_priority_array_from_riptide, 
+        riptide_timed_override, fetch_override_temp_from_field_name, cancel_riptide_timed_override, constraint_check, order, alias
+        - select_one and select_multiple sheets contain these columns: label, name, list name, order
+        - settings sheet contains these columns: form_title, form_id, style, version, run_diagnostic, send_reports, integration
+
+
         """
 
         # Invoke the LLM with the prompt and instructions

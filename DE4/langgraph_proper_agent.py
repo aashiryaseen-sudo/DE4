@@ -235,7 +235,8 @@ class XLSFormProperAgent:
 
         def call_model(state: AgentState, config: RunnableConfig):
             """Invoke the model with system prompt and current state."""
-            system_prompt = SystemMessage("""You are an expert XLSForm agent. Your primary job is to analyze a user's intent and route their request to the correct high-level tool.
+            system_prompt = SystemMessage("""
+                You are an expert XLSForm agent. Your primary job is to analyze a user's intent and route their request to the correct high-level tool.
 
                 Here are the available workflows:
 
