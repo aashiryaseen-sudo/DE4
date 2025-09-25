@@ -379,6 +379,30 @@ class XLSFormXMLEditor:
                             condition_is_met = cell_value.startswith(val.lower())
                         elif op == "ends_with":
                             condition_is_met = cell_value.endswith(val.lower())
+                        elif op == "like":
+                            # SQL-LIKE semantics: % → any sequence, _ → any single char
+                            # Convert to regex and search case-insensitively
+                            escaped = re.escape(val)
+                            regex_pattern = "^" + escaped.replace("%", ".*").replace("_", ".") + "$"
+                            condition_is_met = re.search(regex_pattern, row_data.get(prop, ""), re.IGNORECASE) is not None
+                        elif op == "glob":
+                            # Shell-style wildcards (*, ?, []) using fnmatch
+                            import fnmatch as _fnmatch
+                            condition_is_met = _fnmatch.fnmatch(row_data.get(prop, ""), val)
+                        elif op == "regex":
+                            # Treat value as a regular expression
+                            try:
+                                condition_is_met = re.search(val, row_data.get(prop, ""), re.IGNORECASE) is not None
+                            except re.error:
+                                condition_is_met = False
+                        else:
+                            # Backward-compatible smart wildcard detection if user supplied * or % in value
+                            if isinstance(val, str) and ("*" in val or "%" in val or "_" in val):
+                                escaped = re.escape(val)
+                                regex_pattern = "^" + escaped.replace("%", ".*").replace("_", ".").replace("\\*", ".*") + "$"
+                                condition_is_met = re.search(regex_pattern, row_data.get(prop, ""), re.IGNORECASE) is not None
+                            else:
+                                condition_is_met = cell_value == val.lower()
 
                         if not condition_is_met:
                             group_is_a_match = False
@@ -1031,7 +1055,7 @@ class XLSFormXMLEditor:
         2. Rebuilds the 'select_one' and 'select_multiple' sheets, keeping only the choice lists collected in pass one.
         """
         try:
-            equipment_set_to_keep = {e.lower() for e in equipment_to_keep}
+            equipment_set_to_keep = {str(e).lower() for e in equipment_to_keep}
 
             new_root = ET.Element(self.root.tag, self.root.attrib)
             for child in self.root:
@@ -1089,17 +1113,40 @@ class XLSFormXMLEditor:
 
                 keep_this_row = False
 
+                # Match with wildcard support on equipment_type and relevant
+                def match_with_wildcards(text: str, pattern: str) -> bool:
+                    if pattern is None:
+                        return False
+                    # direct contains
+                    if pattern in text:
+                        return True
+                    # SQL-like
+                    esc = re.escape(pattern)
+                    like_pat = "^" + esc.replace("%", ".*").replace("_", ".") + "$"
+                    if re.search(like_pat, text, re.IGNORECASE):
+                        return True
+                    # glob-like
+                    import fnmatch as _fnmatch
+                    if _fnmatch.fnmatch(text, pattern):
+                        return True
+                    # regex fallback
+                    try:
+                        if re.search(pattern, text, re.IGNORECASE):
+                            return True
+                    except re.error:
+                        pass
+                    # smart star fallback
+                    if "*" in pattern or "%" in pattern or "_" in pattern:
+                        star_esc = re.escape(pattern)
+                        star_pat = "^" + star_esc.replace("%", ".*").replace("_", ".").replace("\\*", ".*") + "$"
+                        return re.search(star_pat, text, re.IGNORECASE) is not None
+                    return False
+
                 if not row_equip_type:
                     keep_this_row = True
-
-                elif row_equip_type in equipment_set_to_keep:
-                    keep_this_row = True
-
                 else:
                     for equip_name in equipment_set_to_keep:
-                        if re.search(rf"['\"]{re.escape(equip_name)}['\"]", relevant_text) or re.search(
-                            rf"\b{re.escape(equip_name)}\b", relevant_text
-                        ):
+                        if match_with_wildcards(row_equip_type, equip_name) or match_with_wildcards(relevant_text, equip_name):
                             keep_this_row = True
                             break
 
@@ -1485,6 +1532,182 @@ class XLSFormXMLEditor:
         except Exception as e:
             import traceback
 
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+
+    def merge_by_filter_from_source(self, source_xml_path: str, filter_groups: List[List[Dict[str, str]]]) -> Dict[str, Any]:
+        """Merge rows from source survey into destination based on filters across any columns.
+
+        filter_groups: OR-of-ANDs where each condition has keys: property, operator, value
+        Operators: equals, contains, starts_with, ends_with, like, glob, regex
+        """
+        try:
+            self._ensure_highlight_styles()
+
+            source_tree = ET.parse(source_xml_path)
+            source_root = source_tree.getroot()
+
+            # Locate tables
+            source_survey_ws = None
+            for ws in source_root.findall(".//ss:Worksheet", self.namespaces):
+                if ws.get(f"{{{self.namespaces['ss']}}}Name") == "survey":
+                    source_survey_ws = ws
+                    break
+            if source_survey_ws is None:
+                return {"success": False, "error": "Source survey worksheet not found"}
+            source_table = self.find_table_in_worksheet(source_survey_ws)
+            if source_table is None:
+                return {"success": False, "error": "Source survey table not found"}
+
+            dest_survey_ws = self.find_worksheet("survey")
+            if dest_survey_ws is None:
+                return {"success": False, "error": "Destination survey worksheet not found"}
+            dest_table = self.find_table_in_worksheet(dest_survey_ws)
+            if dest_table is None:
+                return {"success": False, "error": "Destination survey table not found"}
+
+            headers = self.get_headers(source_table)
+            source_rows = source_table.findall(".//ss:Row", self.namespaces)[1:]
+
+            def condition_matches(cell_value: str, op: str, val: str) -> bool:
+                s = str(cell_value or "")
+                v = str(val or "")
+                s_l, v_l = s.lower(), v.lower()
+                if op == "equals":
+                    return s_l == v_l
+                if op == "contains":
+                    return v_l in s_l
+                if op == "starts_with":
+                    return s_l.startswith(v_l)
+                if op == "ends_with":
+                    return s_l.endswith(v_l)
+                if op == "like":
+                    escaped = re.escape(v)
+                    pattern = "^" + escaped.replace("%", ".*").replace("_", ".") + "$"
+                    return re.search(pattern, s, re.IGNORECASE) is not None
+                if op == "glob":
+                    import fnmatch as _fnmatch
+                    return _fnmatch.fnmatch(s, v)
+                if op == "regex":
+                    try:
+                        return re.search(v, s, re.IGNORECASE) is not None
+                    except re.error:
+                        return False
+                if any(ch in v for ch in ["*", "%", "_"]):
+                    escaped = re.escape(v)
+                    pattern = "^" + escaped.replace("%", ".*").replace("_", ".").replace("\\*", ".*") + "$"
+                    return re.search(pattern, s, re.IGNORECASE) is not None
+                return s_l == v_l
+
+            def row_matches(row: ET.Element) -> bool:
+                row_data: Dict[str, str] = {}
+                cells = row.findall(".//ss:Cell", self.namespaces)
+                current_idx = 0
+                for cell in cells:
+                    idx = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                    if idx:
+                        current_idx = int(idx) - 1
+                    if current_idx < len(headers):
+                        header_name = headers[current_idx]
+                        data_elem = cell.find(".//ss:Data", self.namespaces)
+                        if data_elem is not None:
+                            row_data[header_name] = data_elem.text or ""
+                    current_idx += 1
+
+                for group in filter_groups or []:
+                    ok = True
+                    for cond in group:
+                        if not condition_matches(row_data.get(cond.get("property", ""), ""), cond.get("operator", "equals"), cond.get("value", "")):
+                            ok = False
+                            break
+                    if ok:
+                        return True
+                return False
+
+            rows_to_copy: List[ET.Element] = []
+            used_choice_lists: set[str] = set()
+            try:
+                type_idx = headers.index("type")
+            except ValueError:
+                type_idx = None
+
+            for row in source_rows:
+                if row_matches(row):
+                    cloned = ET.fromstring(ET.tostring(row))
+                    style_attr = f"{{{self.namespaces['ss']}}}StyleID"
+                    if style_attr in cloned.attrib:
+                        del cloned.attrib[style_attr]
+                    for c in cloned.findall(".//ss:Cell", self.namespaces):
+                        if style_attr in c.attrib:
+                            del c.attrib[style_attr]
+                        c.set(style_attr, "AIMerged")
+                    # detect select list name
+                    if type_idx is not None:
+                        current_idx = 0
+                        for cell in row.findall(".//ss:Cell", self.namespaces):
+                            idx = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                            if idx:
+                                current_idx = int(idx) - 1
+                            if current_idx == type_idx:
+                                data = cell.find(".//ss:Data", self.namespaces)
+                                if data is not None and data.text:
+                                    m = re.match(r"^(select_one|select_multiple)\s+(\S+)", data.text)
+                                    if m:
+                                        used_choice_lists.add(m.group(2))
+                                break
+                            current_idx += 1
+                    rows_to_copy.append(cloned)
+
+            for r in rows_to_copy:
+                dest_table.append(r)
+                self.modified = True
+            dest_table.set(f"{{{self.namespaces['ss']}}}ExpandedRowCount", str(len(dest_table.findall(".//ss:Row", self.namespaces))))
+
+            # Copy choices
+            choices_copied = 0
+            if used_choice_lists:
+                for sheet_name in ["select_one", "select_multiple"]:
+                    source_choice_ws = None
+                    for ws in source_root.findall(".//ss:Worksheet", self.namespaces):
+                        if ws.get(f"{{{self.namespaces['ss']}}}Name") == sheet_name:
+                            source_choice_ws = ws
+                            break
+                    dest_choice_ws = self.find_worksheet(sheet_name)
+                    if source_choice_ws is None or dest_choice_ws is None:
+                        continue
+                    source_choice_table = self.find_table_in_worksheet(source_choice_ws)
+                    dest_choice_table = self.find_table_in_worksheet(dest_choice_ws)
+                    if source_choice_table is None or dest_choice_table is None:
+                        continue
+                    sh = self.get_headers(source_choice_table)
+                    try:
+                        ln_idx = sh.index("list name")
+                    except ValueError:
+                        continue
+                    style_attr = f"{{{self.namespaces['ss']}}}StyleID"
+                    for row in source_choice_table.findall(".//ss:Row", self.namespaces)[1:]:
+                        current_idx = 0
+                        for cell in row.findall(".//ss:Cell", self.namespaces):
+                            idx = cell.get(f"{{{self.namespaces['ss']}}}Index")
+                            if idx:
+                                current_idx = int(idx) - 1
+                            if current_idx == ln_idx:
+                                data = cell.find(".//ss:Data", self.namespaces)
+                                if data is not None and data.text in used_choice_lists:
+                                    cloned = ET.fromstring(ET.tostring(row))
+                                    for c in cloned.findall(".//ss:Cell", self.namespaces):
+                                        if style_attr in c.attrib:
+                                            del c.attrib[style_attr]
+                                        c.set(style_attr, "AIMerged")
+                                    dest_choice_table.append(cloned)
+                                    choices_copied += 1
+                                    break
+                            current_idx += 1
+                    dest_choice_table.set(f"{{{self.namespaces['ss']}}}ExpandedRowCount", str(len(dest_choice_table.findall(".//ss:Row", self.namespaces))))
+
+            return {"success": True, "merged_rows": len(rows_to_copy), "copied_choices": choices_copied, "modified": self.modified}
+        except Exception as e:
+            import traceback
             traceback.print_exc()
             return {"success": False, "error": str(e)}
 

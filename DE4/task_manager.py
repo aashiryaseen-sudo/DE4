@@ -116,6 +116,9 @@ class Operator(str, Enum):
     contains = "contains"
     starts_with = "starts_with"
     ends_with = "ends_with"
+    like = "like"
+    glob = "glob"
+    regex = "regex"
 
 
 class FieldFilter(BaseModel):
@@ -134,6 +137,15 @@ class DeleteByFilterParams(BaseModel):
     """
 
     filter_groups: List[List[FieldFilter]] = Field(..., description="A list of filter groups (lists) to apply.")
+
+
+class MergeByFilterParams(BaseModel):
+    """Parameters to merge rows from a source XML using flexible filters across any columns."""
+
+    source_xml_path: str = Field(..., description="Path to the source XML file to read rows from.")
+    filter_groups: List[List[FieldFilter]] = Field(
+        ..., description="OR-of-AND filter groups to select rows from the source survey."
+    )
 
 
 TASK_SESSIONS_CACHE: Dict[str, Any] = {}
@@ -158,6 +170,7 @@ class XLSFormTaskManager:
             "modify_choice": self._handle_modify_choice,
             "add_row": self._handle_add_row,
             "delete_by_filter": self._handle_delete_by_filter,
+            "merge_by_filter": self._handle_merge_by_filter,
         }
 
     def _get_available_actions(self) -> List:
@@ -169,6 +182,7 @@ class XLSFormTaskManager:
             ModifyFieldPropertyParams,
             ModifyChoiceParams,
             AddRowParams,
+            MergeByFilterParams,
         ]
 
     # ---------- Planning (Now LLM-Powered) ----------
@@ -376,6 +390,16 @@ class XLSFormTaskManager:
 
         result = editor.remove_fields_by_filter(filter_groups)
         return result
+
+    def _handle_merge_by_filter(self, params: Dict[str, Any], editor: XLSFormXMLEditor) -> Dict[str, Any]:
+        source_xml_path = params.get("source_xml_path")
+        filter_groups = params.get("filter_groups", [])
+        if not source_xml_path:
+            return {"success": False, "error": "Missing source_xml_path for merge_by_filter."}
+        if not filter_groups:
+            return {"success": False, "error": "No filters were provided for merge_by_filter."}
+
+        return editor.merge_by_filter_from_source(source_xml_path, filter_groups)
 
     # ---------- Helpers ----------
     def _tid(self, idx: int) -> str:

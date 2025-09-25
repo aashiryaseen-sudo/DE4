@@ -165,6 +165,27 @@ class XLSFormXMLEditor:
 
         return matching_rows
 
+    def find_rows_by_pattern_any_column(self, worksheet_name: str, pattern: str) -> List[ET.Element]:
+        """Find rows where any column matches a regex pattern (case-insensitive)."""
+        worksheet = self.find_worksheet(worksheet_name)
+        if not worksheet:
+            return []
+
+        table = self.find_table_in_worksheet(worksheet)
+        if not table:
+            return []
+
+        matching_rows: List[ET.Element] = []
+        rows = table.findall(".//ss:Row", self.namespaces)
+        for row in rows[1:]:  # skip header
+            cells = row.findall(".//ss:Cell", self.namespaces)
+            for cell in cells:
+                data_elem = cell.find(".//ss:Data", self.namespaces)
+                if data_elem is not None and data_elem.text and re.search(pattern, data_elem.text, re.IGNORECASE):
+                    matching_rows.append(row)
+                    break
+        return matching_rows
+
     def remove_row(self, worksheet_name: str, row_element: ET.Element) -> bool:
         """Remove a specific row from a worksheet"""
         try:
@@ -929,10 +950,14 @@ class XLSFormXMLEditor:
 
         try:
             if operation_type == "remove":
-                # Remove fields matching the target field pattern
+                # Remove rows matching the pattern in ANY column
                 if target_sheet and target_field:
-                    # Find rows in the first column (field names) that match the pattern
-                    matching_rows = self.find_rows_by_pattern(target_sheet, 0, re.escape(target_field))
+                    # Auto-wildcard support: if * or % present, convert to regex
+                    pattern = re.escape(target_field)
+                    if any(ch in str(target_field) for ch in ["*", "%", "_"]):
+                        escaped = re.escape(str(target_field))
+                        pattern = "^" + escaped.replace("%", ".*").replace("_", ".").replace("\\*", ".*") + "$"
+                    matching_rows = self.find_rows_by_pattern_any_column(target_sheet, pattern)
 
                     removed_count = 0
                     for row in matching_rows:
@@ -984,27 +1009,59 @@ class XLSFormXMLEditor:
                             result["message"] = f"No field data provided for '{target_field}'"
 
             elif operation_type == "modify":
-                # Modify existing field
+                # Modify existing rows that match in ANY column; target property by header name if provided
                 if target_sheet and target_field:
                     new_value = operation.get("new_value")
-                    if new_value:
-                        # Find the field and modify it
-                        matching_rows = self.find_rows_by_pattern(target_sheet, 0, re.escape(target_field))
+                    property_to_change = operation.get("property_to_change")
+                    if new_value is not None:
+                        # Build pattern with optional wildcard conversion
+                        pattern = re.escape(target_field)
+                        if any(ch in str(target_field) for ch in ["*", "%", "_"]):
+                            escaped = re.escape(str(target_field))
+                            pattern = "^" + escaped.replace("%", ".*").replace("_", ".").replace("\\*", ".*") + "$"
+
+                        matching_rows = self.find_rows_by_pattern_any_column(target_sheet, pattern)
 
                         modified_count = 0
+                        # Determine target column index by header name if provided
+                        worksheet = self.find_worksheet(target_sheet)
+                        table = self.find_table_in_worksheet(worksheet) if worksheet is not None else None
+                        headers = self.get_headers(table) if table is not None else []
+                        target_col_index = None
+                        if property_to_change and headers:
+                            try:
+                                target_col_index = headers.index(property_to_change)
+                            except ValueError:
+                                target_col_index = None
+
                         for row in matching_rows:
-                            # Modify the second column (type) or third column (label) based on operation
-                            # This is a simplified implementation
                             cells = row.findall(".//ss:Cell", self.namespaces)
-                            if len(cells) > 1:
-                                data_elem = cells[1].find(".//ss:Data", self.namespaces)
-                                if data_elem is not None:
-                                    data_elem.text = str(new_value)
-                                    modified_count += 1
+                            # default to column 1 (second column) if no explicit target
+                            col_index = target_col_index if target_col_index is not None else 1
+                            if col_index < 0:
+                                continue
+                            # ensure enough cells and create missing cells as needed
+                            while len(cells) <= col_index:
+                                new_cell = ET.SubElement(row, "{urn:schemas-microsoft-com:office:spreadsheet}Cell")
+                                ET.SubElement(new_cell, "{urn:schemas-microsoft-com:office:spreadsheet}Data").set(
+                                    "{urn:schemas-microsoft-com:office:spreadsheet}Type", "String"
+                                )
+                                cells = row.findall(".//ss:Cell", self.namespaces)
+
+                            cell = cells[col_index]
+                            data_elem = cell.find(".//ss:Data", self.namespaces)
+                            if data_elem is None:
+                                data_elem = ET.SubElement(
+                                    cell, "{urn:schemas-microsoft-com:office:spreadsheet}Data"
+                                )
+                                data_elem.set("{urn:schemas-microsoft-com:office:spreadsheet}Type", "String")
+                            data_elem.text = str(new_value)
+                            cell.set("{urn:schemas-microsoft-com:office:spreadsheet}StyleID", "AIModified")
+                            modified_count += 1
 
                         result["success"] = modified_count > 0
                         result["message"] = (
-                            f"Modified {modified_count} instances of '{target_field}' in '{target_sheet}'"
+                            f"Modified {modified_count} row(s) matching '{target_field}' in '{target_sheet}'"
                         )
                     else:
                         result["message"] = f"No new value provided for '{target_field}'"
